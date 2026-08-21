@@ -1,0 +1,59 @@
+PROJECT: AskShop
+
+TASK:
+¿Dónde se calcula el total?
+
+PRIMARY FILES
+
+factura.py
+score: 1.00
+reason: symbol text match; file content match
+Lines 1-3
+class Factura:
+    def total(self):
+        return 0
+
+SECONDARY CONTEXT
+
+(none)
+
+SYMBOLS
+
+PRIMARY class Factura (factura.py L1)
+PRIMARY def Factura.total(self) (factura.py L2)
+
+RELATIONSHIPS
+
+(none)
+
+EVIDENCE
+
+factura.py (SYMBOL/MEDIUM/demonstrated)
+indexed symbol is related to the task
+factura.py (TEXTUAL/LOW/demonstrated)
+path or file content matches task terms
+factura.py (SYMBOL/MEDIUM/demonstrated)
+selected symbol matches the task: Factura.total
+Evidence summary: strong=0, medium=2, weak=1, unresolved=0
+
+STATISTICS
+
+Candidate files: 1
+Candidate symbols: 1
+Selected files: 1
+Selected symbols: 2
+Selected lines: 3
+Selected chars: 52
+Available chars: 53
+Reduction: 1.9%
+Estimated tokens: 13
+Graph depth: 0
+Search seconds: 0.001
+Total seconds: 0.002
+
+LIMITATIONS
+
+- Análisis de tarea determinista: no hay LLM ni embeddings.
+- La expansión usa el grafo de imports Python resuelto; imports dinámicos no aparecen.
+- Los fragmentos se recortan alrededor de símbolos; un archivo puede contener más código relevante.
+

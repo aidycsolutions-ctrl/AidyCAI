@@ -1,0 +1,795 @@
+from __future__ import annotations
+
+import json
+import os
+import queue
+import threading
+import traceback
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable
+
+from aidycai.application.bootstrap import open_app
+from aidycai.application.diagnostics import render_diagnosis, render_human_answer
+from aidycai.domain.context_models import ContextBundle, ROLE_PRIMARY
+
+
+def format_bytes(value: int) -> str:
+    size = float(value)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{value} B"
+
+
+def bundle_summary(bundle: ContextBundle) -> str:
+    stats = bundle.statistics
+    lines = [
+        f"Proyecto: {bundle.project_name}",
+        f"Pregunta: {bundle.task}",
+        "",
+        f"Candidatos: {stats.candidate_files} archivos, {stats.candidate_symbols} símbolos",
+        f"Seleccionados: {stats.selected_files} archivos, {stats.selected_lines} líneas",
+        f"Contexto: {stats.selected_chars:,} caracteres (~{stats.estimated_tokens:,} tokens)",
+        f"Reducción: {stats.reduction_ratio * 100:.1f}%",
+        "",
+        "PRIMARY",
+    ]
+    for item in bundle.files:
+        if item.role == ROLE_PRIMARY:
+            lines.append(f"  {item.path}  · score {item.score:.2f}")
+            lines.append(f"    {'; '.join(item.reasons)}")
+            for fragment in item.fragments:
+                lines.append(
+                    f"    L{fragment.line_start}-{fragment.line_end}"
+                    + (" · comprimido" if fragment.compressed else "")
+                )
+    lines.append("")
+    lines.append("SECONDARY / REFERENCE")
+    for item in bundle.files:
+        if item.role != ROLE_PRIMARY:
+            lines.append(f"  {item.path} [{item.role}] · score {item.score:.2f}")
+            lines.append(f"    {'; '.join(item.reasons)}")
+    return "\n".join(lines)
+
+
+@dataclass
+class Conversation:
+    id: int
+    title: str
+    project_id: str | None = None
+    query: str = ""
+    bundle: ContextBundle | None = None
+    search_results: list = field(default_factory=list)
+    turns: list[tuple[str, str]] = field(default_factory=list)
+
+
+class AIDYCAIWindow:
+    """Thin GUI layer over the existing application services."""
+
+    def __init__(self, ctk) -> None:
+        self.ctk = ctk
+        self.root = ctk.CTk()
+        self.root.title("AIDYCAI — Local Development Intelligence")
+        self.root.geometry("1280x820")
+        self.root.minsize(1000, 650)
+
+        self.projects = []
+        self.selected_project = None
+        self.current_bundle: ContextBundle | None = None
+        self.busy = False
+        self._operation_id = 0
+        self._active_operation_id: int | None = None
+        self._background_events: queue.Queue[tuple] = queue.Queue()
+        self.conversations: list[Conversation] = []
+        self.active_conversation: Conversation | None = None
+        self._next_conversation_id = 1
+
+        self._build_ui()
+        self.new_conversation()
+        self.root.after(50, self._poll_background_events)
+        self.refresh_projects()
+
+    def _build_ui(self) -> None:
+        ctk = self.ctk
+        self.root.configure(fg_color=("#F4F7FB", "#0B1120"))
+        self.root.grid_columnconfigure(1, weight=1)
+        self.root.grid_rowconfigure(0, weight=1)
+
+        self.sidebar = ctk.CTkFrame(self.root, width=300, corner_radius=0, fg_color=("#0F172A", "#0F172A"))
+        self.sidebar.grid(row=0, column=0, sticky="nsew")
+        self.sidebar.grid_propagate(False)
+
+        title = ctk.CTkLabel(
+            self.sidebar,
+            text="AIDYCAI",
+            font=ctk.CTkFont(size=24, weight="bold"),
+        )
+        title.pack(anchor="w", padx=20, pady=(22, 2))
+        ctk.CTkLabel(
+            self.sidebar,
+            text="Inteligencia local para desarrollo",
+            text_color=("#CBD5E1", "#CBD5E1"),
+        ).pack(anchor="w", padx=20, pady=(0, 22))
+
+        ctk.CTkLabel(
+            self.sidebar, text="CONVERSACIONES", anchor="w",
+            text_color="#94A3B8",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).pack(fill="x", padx=20, pady=(0, 8))
+
+        self.new_chat_button = ctk.CTkButton(
+            self.sidebar, text="+ Nueva conversación", height=36,
+            fg_color="#2563EB", hover_color="#1D4ED8", text_color="#FFFFFF",
+            command=self.new_conversation,
+        )
+        self.new_chat_button.pack(fill="x", padx=18, pady=(0, 10))
+
+        self.conversation_box = ctk.CTkScrollableFrame(
+            self.sidebar, height=170, fg_color="#111C31",
+        )
+        self.conversation_box.pack(fill="x", padx=10, pady=(0, 14))
+
+        ctk.CTkLabel(
+            self.sidebar, text="PROYECTOS", anchor="w",
+            text_color="#94A3B8",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).pack(fill="x", padx=20, pady=(0, 8))
+
+        self.project_box = ctk.CTkScrollableFrame(self.sidebar, fg_color="#111C31")
+        self.project_box.pack(fill="both", expand=True, padx=10)
+
+        self.refresh_button = ctk.CTkButton(
+            self.sidebar, text="Actualizar proyectos", height=36,
+            fg_color="#1E293B", hover_color="#334155", text_color="#F8FAFC",
+            command=self.refresh_projects,
+        )
+        self.refresh_button.pack(fill="x", padx=18, pady=18)
+
+        self.main = ctk.CTkFrame(self.root, corner_radius=0, fg_color=("#F4F7FB", "#0B1120"))
+        self.main.grid(row=0, column=1, sticky="nsew", padx=0, pady=0)
+        self.main.grid_columnconfigure(0, weight=1)
+        self.main.grid_rowconfigure(2, weight=1)
+
+        header = ctk.CTkFrame(self.main, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", padx=28, pady=(22, 8))
+        header.grid_columnconfigure(0, weight=1)
+
+        self.project_label = ctk.CTkLabel(
+            header, text="Selecciona un proyecto",
+            font=ctk.CTkFont(size=22, weight="bold"), anchor="w",
+        )
+        self.project_label.grid(row=0, column=0, sticky="w")
+
+        self.status_label = ctk.CTkLabel(
+            header, text="Listo", anchor="e",
+            text_color=("#475569", "#CBD5E1"),
+        )
+        self.status_label.grid(row=0, column=1, sticky="e")
+
+        query_frame = ctk.CTkFrame(self.main, fg_color=("#FFFFFF", "#172033"), border_width=1, border_color=("#CBD5E1", "#334155"))
+        query_frame.grid(row=1, column=0, sticky="ew", padx=28, pady=(0, 14))
+        query_frame.grid_columnconfigure(0, weight=1)
+
+        self.query = ctk.CTkEntry(
+            query_frame,
+            placeholder_text="Pregunta sobre el proyecto...",
+            height=42, fg_color=("#FFFFFF", "#0F172A"), border_color=("#94A3B8", "#475569"),
+            text_color=("#0F172A", "#F8FAFC"), placeholder_text_color=("#64748B", "#94A3B8"),
+        )
+        self.query.grid(row=0, column=0, sticky="ew", padx=12, pady=12)
+        self.query.bind("<Return>", lambda _event: self.ask())
+
+        self.ask_button = ctk.CTkButton(
+            query_frame, text="Consultar", width=120, height=42, command=self.ask,
+            fg_color="#2563EB", hover_color="#1D4ED8", text_color="#FFFFFF",
+        )
+        self.ask_button.grid(row=0, column=1, padx=(0, 6), pady=12)
+
+        self.search_button = ctk.CTkButton(
+            query_frame, text="Buscar", width=100, height=42, command=self.search,
+            fg_color=("#E2E8F0", "#334155"), hover_color=("#CBD5E1", "#475569"),
+            text_color=("#0F172A", "#F8FAFC"),
+        )
+        self.search_button.grid(row=0, column=2, padx=(0, 12), pady=12)
+
+        self.result_tabs = ctk.CTkTabview(self.main)
+        self.result_tabs.grid(row=2, column=0, sticky="nsew", padx=28, pady=(0, 12))
+        self.result_tabs.add("Conversación")
+        self.result_tabs.add("Contexto")
+        self.result_tabs.add("Búsqueda")
+        self.result_tabs.add("Detalles")
+        self.result_tabs.add("Diagnóstico")
+
+        conversation_tab = self.result_tabs.tab("Conversación")
+        conversation_tab.grid_columnconfigure(0, weight=1)
+        conversation_tab.grid_rowconfigure(0, weight=1)
+        conversation_tab.grid_rowconfigure(1, weight=0)
+        conversation_tab.grid_rowconfigure(2, weight=0)
+
+        self.chat_scroll = ctk.CTkScrollableFrame(
+            conversation_tab, fg_color=("#F8FAFC", "#0F172A"),
+        )
+        self.chat_scroll.grid(row=0, column=0, sticky="nsew", padx=8, pady=(8, 4))
+
+        self.diagnostic_toggle = ctk.CTkButton(
+            conversation_tab,
+            text="▸  Mostrar diagnóstico técnico",
+            height=30,
+            anchor="w",
+            fg_color="transparent",
+            hover_color=("#E2E8F0", "#1E293B"),
+            text_color=("#64748B", "#94A3B8"),
+            command=self._toggle_diagnosis,
+        )
+        self.diagnostic_toggle.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 4))
+
+        self.diagnostic_panel = ctk.CTkFrame(
+            conversation_tab, fg_color=("#F1F5F9", "#111827"),
+        )
+        self.diagnostic_text = ctk.CTkTextbox(
+            self.diagnostic_panel, wrap="word", height=190,
+            fg_color=("#F1F5F9", "#111827"), text_color=("#334155", "#CBD5E1"),
+        )
+        self.diagnosis_text = self.diagnostic_text
+        self.diagnostic_text.pack(fill="both", expand=True, padx=8, pady=8)
+        self._diagnosis_expanded = False
+
+        self.context_text = ctk.CTkTextbox(
+            self.result_tabs.tab("Contexto"), wrap="none",
+            fg_color=("#FFFFFF", "#111827"), text_color=("#0F172A", "#F8FAFC"),
+        )
+        self.context_text.pack(fill="both", expand=True, padx=8, pady=8)
+
+        self.search_text = ctk.CTkTextbox(
+            self.result_tabs.tab("Búsqueda"), wrap="none",
+            fg_color=("#FFFFFF", "#111827"), text_color=("#0F172A", "#F8FAFC"),
+        )
+        self.search_text.pack(fill="both", expand=True, padx=8, pady=8)
+
+        self.detail_text = ctk.CTkTextbox(
+            self.result_tabs.tab("Detalles"), wrap="none",
+            fg_color=("#FFFFFF", "#111827"), text_color=("#0F172A", "#F8FAFC"),
+        )
+        self.detail_text.pack(fill="both", expand=True, padx=8, pady=8)
+
+        self.diagnosis_tab_text = ctk.CTkTextbox(
+            self.result_tabs.tab("Diagnóstico"), wrap="word",
+            fg_color=("#FFFFFF", "#111827"), text_color=("#0F172A", "#F8FAFC"),
+        )
+        self.diagnosis_tab_text.pack(fill="both", expand=True, padx=8, pady=8)
+
+        actions = ctk.CTkFrame(self.main, fg_color="transparent")
+        actions.grid(row=3, column=0, sticky="ew", padx=28, pady=(0, 10))
+        for i in range(5):
+            actions.grid_columnconfigure(i, weight=1)
+
+        ctk.CTkButton(actions, text="Indexar", command=self.index_project, fg_color=("#E2E8F0", "#334155"), hover_color=("#CBD5E1", "#475569"), text_color=("#0F172A", "#F8FAFC")).grid(
+            row=0, column=0, padx=(0, 6), sticky="ew"
+        )
+        ctk.CTkButton(actions, text="Ver contexto", command=self.show_context, fg_color=("#E2E8F0", "#334155"), hover_color=("#CBD5E1", "#475569"), text_color=("#0F172A", "#F8FAFC")).grid(
+            row=0, column=1, padx=6, sticky="ew"
+        )
+        ctk.CTkButton(actions, text="Exportar JSON", command=lambda: self.export("json"), fg_color=("#E2E8F0", "#334155"), hover_color=("#CBD5E1", "#475569"), text_color=("#0F172A", "#F8FAFC")).grid(
+            row=0, column=2, padx=6, sticky="ew"
+        )
+        ctk.CTkButton(actions, text="Exportar TXT", command=lambda: self.export("txt"), fg_color=("#E2E8F0", "#334155"), hover_color=("#CBD5E1", "#475569"), text_color=("#0F172A", "#F8FAFC")).grid(
+            row=0, column=3, padx=6, sticky="ew"
+        )
+        ctk.CTkButton(actions, text="Abrir archivo", command=self.open_file, fg_color=("#E2E8F0", "#334155"), hover_color=("#CBD5E1", "#475569"), text_color=("#0F172A", "#F8FAFC")).grid(
+            row=0, column=4, padx=(6, 0), sticky="ew"
+        )
+
+        progress_frame = ctk.CTkFrame(self.main, fg_color="transparent")
+        progress_frame.grid(row=4, column=0, sticky="ew", padx=28, pady=(0, 8))
+        progress_frame.grid_columnconfigure(0, weight=1)
+        self.progress_label = ctk.CTkLabel(
+            progress_frame, text="Listo", anchor="w",
+            text_color=("#475569", "#CBD5E1"),
+        )
+        self.progress_label.grid(row=0, column=0, sticky="w", pady=(0, 4))
+        self.progress_bar = ctk.CTkProgressBar(progress_frame, height=8)
+        self.progress_bar.grid(row=1, column=0, sticky="ew")
+        self.progress_bar.set(0)
+
+        self.log = ctk.CTkTextbox(self.main, height=105, wrap="word", fg_color=("#E2E8F0", "#111827"), text_color=("#0F172A", "#E2E8F0"))
+        self.log.grid(row=5, column=0, sticky="ew", padx=28, pady=(0, 18))
+        self.log.configure(state="disabled")
+
+    def _log(self, message: str) -> None:
+        self.log.configure(state="normal")
+        self.log.insert("end", message + "\n")
+        self.log.see("end")
+        self.log.configure(state="disabled")
+
+    def _set_status(self, text: str) -> None:
+        self.status_label.configure(text=text)
+
+    def refresh_projects(self) -> None:
+        def operation():
+            with open_app(seed=False) as app:
+                return app.registry.list_projects()
+
+        self._run_background(operation, self._set_projects, "Actualizando proyectos")
+
+    def _set_projects(self, projects) -> None:
+        self.projects = list(projects)
+        for widget in self.project_box.winfo_children():
+            widget.destroy()
+
+        if not self.projects:
+            self.ctk.CTkLabel(self.project_box, text="No hay proyectos registrados.").pack(
+                anchor="w", padx=10, pady=10
+            )
+            return
+
+        for project in self.projects:
+            exists = project.path.exists() and project.path.is_dir()
+            state = "●" if project.active and exists else "○"
+            text = f"{state}  {project.name}"
+            button = self.ctk.CTkButton(
+                self.project_box,
+                text=text,
+                anchor="w",
+                fg_color="transparent",
+                hover_color="#243B63",
+                text_color="#F8FAFC",
+                command=lambda p=project: self.select_project(p),
+            )
+            button.pack(fill="x", pady=2)
+
+        if self.selected_project:
+            match = next(
+                (p for p in self.projects if p.id == self.selected_project.id), None
+            )
+            if match:
+                self.select_project(match)
+        elif self.projects:
+            self.select_project(self.projects[0])
+
+    def _refresh_conversations(self) -> None:
+        for widget in self.conversation_box.winfo_children():
+            widget.destroy()
+        for conversation in self.conversations:
+            active = conversation is self.active_conversation
+            button = self.ctk.CTkButton(
+                self.conversation_box,
+                text=("●  " if active else "   ") + conversation.title,
+                anchor="w", height=34,
+                fg_color=("#1D4ED8", "#1D4ED8") if active else "transparent",
+                hover_color="#243B63", text_color="#F8FAFC",
+                command=lambda c=conversation: self.select_conversation(c),
+            )
+            button.pack(fill="x", pady=2)
+
+    def new_conversation(self) -> None:
+        conversation = Conversation(id=self._next_conversation_id, title=f"Conversación {self._next_conversation_id}")
+        self._next_conversation_id += 1
+        self.conversations.append(conversation)
+        self.active_conversation = conversation
+        self.current_bundle = None
+        self._refresh_conversations()
+        self._restore_conversation()
+        if hasattr(self, "result_tabs"):
+            self.result_tabs.set("Conversación")
+
+    def select_conversation(self, conversation: Conversation) -> None:
+        self.active_conversation = conversation
+        if conversation.project_id:
+            project = next((item for item in self.projects if item.id == conversation.project_id), None)
+            if project is not None:
+                self.selected_project = project
+        self.current_bundle = conversation.bundle
+        self._refresh_conversations()
+        self._restore_conversation()
+
+    def _restore_conversation(self) -> None:
+        conversation = self.active_conversation
+        if conversation is None:
+            return
+        self.query.delete(0, "end")
+        if conversation.query:
+            self.query.insert(0, conversation.query)
+        self.context_text.delete("1.0", "end")
+        self.detail_text.delete("1.0", "end")
+        self.diagnostic_text.delete("1.0", "end")
+        self.diagnosis_tab_text.delete("1.0", "end")
+        self.search_text.delete("1.0", "end")
+        self._render_conversation()
+        if conversation.bundle:
+            self.context_text.insert("end", conversation.bundle.to_text())
+            self.detail_text.insert("end", bundle_summary(conversation.bundle))
+            diagnosis = render_diagnosis(conversation.bundle)
+            self.diagnostic_text.insert("end", diagnosis)
+            self.diagnosis_tab_text.insert("end", diagnosis)
+        if conversation.search_results:
+            for hit in conversation.search_results:
+                lines = str(hit.line_start) if hit.line_start and hit.line_end is None else (f"{hit.line_start}-{hit.line_end}" if hit.line_start else "")
+                self.search_text.insert(
+                    "end",
+                    f"{hit.kind or hit.symbol_type:<12} {hit.rel_path}  {hit.qualified_name or ''}  {lines}  score={hit.score:.3f}\n",
+                )
+        self.project_label.configure(text=self.selected_project.name if self.selected_project else "Selecciona un proyecto")
+        self._set_status("Listo")
+
+    def _render_conversation(self) -> None:
+        """Render each turn as a simple two-sided chat: user right, AIDYCAI left."""
+        if not hasattr(self, "chat_scroll"):
+            return
+        for widget in self.chat_scroll.winfo_children():
+            widget.destroy()
+        conversation = self.active_conversation
+        if conversation is None or not conversation.turns:
+            self.ctk.CTkLabel(
+                self.chat_scroll,
+                text="Haz una pregunta sobre el proyecto para comenzar.",
+                text_color=("#64748B", "#94A3B8"),
+            ).pack(anchor="center", pady=40)
+            return
+
+        for prompt, answer in conversation.turns:
+            row = self.ctk.CTkFrame(self.chat_scroll, fg_color="transparent")
+            row.pack(fill="x", padx=10, pady=8)
+            row.grid_columnconfigure(0, weight=1)
+            row.grid_columnconfigure(1, weight=1)
+
+            ai_bubble = self.ctk.CTkFrame(
+                row, fg_color=("#FFFFFF", "#172033"), corner_radius=14,
+                border_width=1, border_color=("#E2E8F0", "#334155"),
+            )
+            ai_bubble.grid(row=0, column=0, sticky="w", padx=(0, 28))
+            self.ctk.CTkLabel(
+                ai_bubble, text="AIDYCAI", anchor="w",
+                font=self.ctk.CTkFont(size=11, weight="bold"),
+                text_color=("#2563EB", "#60A5FA"),
+            ).pack(anchor="w", padx=14, pady=(10, 2))
+            self.ctk.CTkLabel(
+                ai_bubble, text=answer, anchor="w", justify="left",
+                wraplength=520,
+                text_color=("#0F172A", "#F8FAFC"),
+            ).pack(anchor="w", padx=14, pady=(0, 12))
+
+            user_bubble = self.ctk.CTkFrame(
+                row, fg_color=("#DBEAFE", "#1D4ED8"), corner_radius=14,
+            )
+            user_bubble.grid(row=0, column=1, sticky="e", padx=(28, 0))
+            self.ctk.CTkLabel(
+                user_bubble, text="TÚ", anchor="w",
+                font=self.ctk.CTkFont(size=11, weight="bold"),
+                text_color=("#1E40AF", "#DBEAFE"),
+            ).pack(anchor="w", padx=14, pady=(10, 2))
+            self.ctk.CTkLabel(
+                user_bubble, text=prompt, anchor="w", justify="left",
+                wraplength=520,
+                text_color=("#0F172A", "#FFFFFF"),
+            ).pack(anchor="w", padx=14, pady=(0, 12))
+
+        self.root.after(10, lambda: self.chat_scroll._parent_canvas.yview_moveto(1.0))
+
+    def _toggle_diagnosis(self) -> None:
+        self._diagnosis_expanded = not self._diagnosis_expanded
+        if self._diagnosis_expanded:
+            self.diagnostic_panel.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0, 8))
+            self.diagnostic_toggle.configure(text="▾  Ocultar diagnóstico técnico")
+        else:
+            self.diagnostic_panel.grid_forget()
+            self.diagnostic_toggle.configure(text="▸  Mostrar diagnóstico técnico")
+
+    def select_project(self, project) -> None:
+        self.selected_project = project
+        if self.active_conversation:
+            self.active_conversation.project_id = project.id
+        self.project_label.configure(text=project.name)
+        self._set_status("Listo")
+        self._log(f"[INFO] Proyecto seleccionado: {project.name}")
+
+    def _require_project(self):
+        if self.selected_project is None:
+            self._log("[WARN] Selecciona un proyecto primero.")
+            return None
+        return self.selected_project
+
+    def _run_background(
+        self,
+        operation: Callable,
+        success: Callable,
+        label: str,
+        progress: Callable[[str, int, int, str | None], None] | None = None,
+        *,
+        refresh_projects: bool = False,
+    ) -> None:
+        if self.busy:
+            self._log("[WARN] Ya hay una operación en curso.")
+            return
+
+        self._operation_id += 1
+        operation_id = self._operation_id
+        self._active_operation_id = operation_id
+        self.busy = True
+        self._set_status(label + "...")
+        self._set_progress(label, 0, 0, None)
+        self._log("[INFO] " + label + "...")
+
+        def worker() -> None:
+            try:
+                result = operation()
+                self._background_events.put(("complete", operation_id, success, result, refresh_projects))
+            except Exception as exc:
+                self._background_events.put(("error", operation_id, exc, refresh_projects))
+
+        threading.Thread(target=worker, daemon=True, name=f"aidycai-{operation_id}").start()
+
+    def _poll_background_events(self) -> None:
+        try:
+            while True:
+                event = self._background_events.get_nowait()
+                kind, operation_id, *payload = event
+                if operation_id != self._active_operation_id:
+                    continue
+
+                if kind == "progress":
+                    stage, done, total, current = payload
+                    self._set_progress(stage, done, total, current)
+                    continue
+
+                if kind == "log":
+                    self._log(payload[0])
+                    continue
+
+                if kind == "complete":
+                    success, result, refresh_projects = payload
+                    try:
+                        success(result)
+                    except Exception as exc:
+                        self._set_operation_error(exc)
+                    finally:
+                        self._finish_operation(operation_id)
+                    if refresh_projects:
+                        self.refresh_projects()
+                    continue
+
+                if kind == "error":
+                    exc, refresh_projects = payload
+                    try:
+                        self._error(exc)
+                    finally:
+                        self._finish_operation(operation_id)
+                    if refresh_projects:
+                        self.refresh_projects()
+        except queue.Empty:
+            pass
+        finally:
+            self.root.after(50, self._poll_background_events)
+
+    def _finish_operation(self, operation_id: int | None = None) -> None:
+        if operation_id is not None and operation_id != self._active_operation_id:
+            return
+        # Clear the logical lock before touching widgets so a UI exception
+        # cannot leave the application permanently busy.
+        self.busy = False
+        self._active_operation_id = None
+        try:
+            self._set_status("Listo")
+        except Exception:
+            traceback.print_exc()
+
+    def _set_progress(self, stage: str, done: int, total: int, current: str | None) -> None:
+        if total > 0:
+            value = min(1.0, max(0.0, done / total))
+            self.progress_bar.set(value)
+            suffix = f" · {done:,}/{total:,}"
+        else:
+            self.progress_bar.set(0)
+            suffix = ""
+        labels = {
+            "scan": "Escaneando archivos",
+            "prepare": "Preparando archivos nuevos",
+            "analyze": "Analizando archivos",
+            "graph": "Actualizando grafo de imports",
+            "done": "Indexación completada",
+        }
+        text = labels.get(stage, stage) + suffix
+        if current:
+            text += f" · {current}"
+        self.progress_label.configure(text=text)
+        self.status_label.configure(text=text)
+
+    def _index_progress_callback(self, stage: str, done: int, total: int, current: str | None) -> None:
+        operation_id = self._active_operation_id
+        if operation_id is not None:
+            self._background_events.put(("progress", operation_id, stage, done, total, current))
+
+    def _worker_log(self, message: str) -> None:
+        operation_id = self._active_operation_id
+        if operation_id is not None:
+            self._background_events.put(("log", operation_id, message))
+
+    def _set_operation_error(self, exc: Exception) -> None:
+        self._set_status("Error")
+        self.progress_label.configure(text="Operación detenida por un error")
+        self.progress_bar.set(0)
+        self._log(f"[ERROR] {exc}")
+
+    def ask(self) -> None:
+        project = self._require_project()
+        task = self.query.get().strip()
+        if not project or not task:
+            self._log("[WARN] Escribe una pregunta.")
+            return
+
+        conversation = self.active_conversation
+
+        def operation():
+            with open_app(seed=False) as app:
+                index_service = app.index_service()
+                stats = index_service.stats(project.id)
+                if stats.last_indexed_at is None:
+                    self._index_progress_callback("scan", 0, 0, "Índice no encontrado · indexando automáticamente")
+                    self._worker_log("[INFO] No hay índice para el proyecto; indexando automáticamente...")
+                    index_service.index_project(project.id, progress=self._index_progress_callback)
+                    self._worker_log("[OK] Índice creado. Continuando con la construcción de contexto...")
+                return app.context_engine().build(project.id, task)
+
+        def success(bundle):
+            conversation.bundle = bundle
+            conversation.query = task
+            conversation.project_id = project.id
+            conversation.title = task[:42] + ("…" if len(task) > 42 else "")
+            answer = render_human_answer(bundle)
+            conversation.turns.append((task, answer))
+            self._refresh_conversations()
+            if self.active_conversation is conversation:
+                self.current_bundle = bundle
+            self.context_text.delete("1.0", "end")
+            self.context_text.insert("end", bundle.to_text())
+            self.detail_text.delete("1.0", "end")
+            self.detail_text.insert("end", bundle_summary(bundle))
+            diagnosis = render_diagnosis(bundle)
+            self.diagnostic_text.delete("1.0", "end")
+            self.diagnostic_text.insert("end", diagnosis)
+            self.diagnosis_tab_text.delete("1.0", "end")
+            self.diagnosis_tab_text.insert("end", diagnosis)
+            self._restore_conversation()
+            self.result_tabs.set("Conversación")
+            self._log(
+                f"[OK] ContextBundle: {bundle.statistics.selected_files} archivos, "
+                f"{bundle.statistics.selected_lines} líneas."
+            )
+
+        self._run_background(operation, success, "Construyendo contexto")
+
+    def show_context(self) -> None:
+        if self.current_bundle is None:
+            self._log("[WARN] Todavía no hay un ContextBundle.")
+            return
+        self.context_text.delete("1.0", "end")
+        self.context_text.insert("end", self.current_bundle.to_text())
+        self.result_tabs.set("Contexto")
+
+    def search(self) -> None:
+        project = self._require_project()
+        query = self.query.get().strip()
+        if not project or not query:
+            self._log("[WARN] Escribe algo para buscar.")
+            return
+
+        conversation = self.active_conversation
+
+        def operation():
+            with open_app(seed=False) as app:
+                return app.index_service().search(project.id, query, limit=50)
+
+        def success(hits):
+            conversation.search_results = list(hits)
+            conversation.query = query
+            self.search_text.delete("1.0", "end")
+            if not hits:
+                self.search_text.insert("end", "Sin resultados.\n")
+            else:
+                for hit in hits:
+                    lines = ""
+                    if hit.line_start:
+                        lines = str(hit.line_start) if hit.line_end is None else f"{hit.line_start}-{hit.line_end}"
+                    self.search_text.insert(
+                        "end",
+                        f"{hit.kind or hit.symbol_type:<12} {hit.rel_path}"
+                        f"  {hit.qualified_name or ''}  {lines}  score={hit.score:.3f}\n"
+                    )
+            self.result_tabs.set("Búsqueda")
+            self._log(f"[OK] Búsqueda completada: {len(hits)} resultados.")
+
+        self._run_background(operation, success, "Buscando")
+
+    def index_project(self) -> None:
+        project = self._require_project()
+        if not project:
+            return
+
+        def operation():
+            with open_app(seed=False) as app:
+                return app.index_service().index_project(
+                    project.id, rebuild=True, progress=self._index_progress_callback
+                )
+
+        def success(summary):
+            self._set_progress("done", summary.files_found, summary.files_found, None)
+            self._log(
+                f"[OK] Índice actualizado: {summary.files_found:,} archivos; "
+                f"{summary.files_created + summary.files_modified} creados/modificados; "
+                f"{summary.symbols:,} símbolos; {summary.imports:,} imports; "
+                f"{summary.errors} errores; {summary.duration_s:.1f}s."
+            )
+
+        self._run_background(operation, success, "Indexando proyecto", refresh_projects=True)
+
+    def export(self, kind: str) -> None:
+        if self.current_bundle is None:
+            self._log("[WARN] Genera primero un contexto.")
+            return
+        from tkinter import filedialog
+
+        ext = ".json" if kind == "json" else ".txt"
+        path = filedialog.asksaveasfilename(
+            title="Exportar ContextBundle",
+            defaultextension=ext,
+            filetypes=[("JSON" if kind == "json" else "Texto", "*" + ext)],
+        )
+        if not path:
+            return
+        content = self.current_bundle.to_json() if kind == "json" else self.current_bundle.to_text()
+        Path(path).write_text(content, encoding="utf-8")
+        self._log(f"[OK] Exportado: {path}")
+
+    def open_file(self) -> None:
+        if self.current_bundle is None or self.selected_project is None:
+            self._log("[WARN] Genera un contexto primero.")
+            return
+
+        candidates = [item for item in self.current_bundle.files]
+        if not candidates:
+            self._log("[WARN] El contexto no contiene archivos.")
+            return
+
+        # Open the first selected file; future versions can expose a file picker.
+        rel = candidates[0].path
+        path = (self.selected_project.path / rel).resolve()
+        try:
+            path.relative_to(self.selected_project.path.resolve())
+        except ValueError:
+            self._log("[ERROR] Ruta fuera del proyecto bloqueada.")
+            return
+
+        if not path.exists():
+            self._log(f"[ERROR] No existe: {path}")
+            return
+
+        try:
+            os.startfile(str(path))  # type: ignore[attr-defined]
+        except AttributeError:
+            import subprocess
+            subprocess.Popen(["xdg-open", str(path)])
+        self._log(f"[INFO] Abriendo: {path}")
+
+    def _error(self, exc: Exception) -> None:
+        self._set_status("Error")
+        self.progress_label.configure(text=f"Error: {type(exc).__name__}")
+        self.progress_bar.set(0)
+        self._log(f"[ERROR] {type(exc).__name__}: {exc}")
+        traceback.print_exception(type(exc), exc, exc.__traceback__)
+
+    def run(self) -> None:
+        self.root.mainloop()
+
+
+def run_gui() -> None:
+    try:
+        import customtkinter as ctk
+    except ImportError as exc:
+        raise RuntimeError(
+            "La GUI requiere CustomTkinter. Ejecuta: pip install -e '.[gui]'"
+        ) from exc
+
+    ctk.set_appearance_mode("system")
+    ctk.set_default_color_theme("blue")
+    AIDYCAIWindow(ctk).run()

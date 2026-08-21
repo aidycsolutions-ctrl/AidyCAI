@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aidycai"
+version = "0.1.0"
+description = "Capa local de inteligencia para desarrollo de software (multi-proyecto)."
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "AidyC" }]
+dependencies = [
+    "typer>=0.12",
+    "rich>=13",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+gui = [
+    "customtkinter>=5.2",
+]
+
+[project.scripts]
+aidycai = "aidycai.cli.main:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
