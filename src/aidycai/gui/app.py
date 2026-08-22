@@ -5,6 +5,8 @@ import os
 import queue
 import threading
 import traceback
+import webbrowser
+from tkinter import ttk, messagebox
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -19,6 +21,14 @@ from aidycai.infrastructure.git_service import GitService
 from aidycai.services.project_runner import ProjectRunner
 from aidycai.services.publisher_service import PublisherService
 from aidycai.services.github_actions import GitHubActionsService
+from aidycai.services.work_items import WorkItemStore
+from aidycai.services.workspace_service import (
+    DEFAULT_IGNORED_DIRS,
+    is_probably_text,
+    read_text_file,
+    visible_children,
+    write_text_file,
+)
 
 
 def format_bytes(value: int) -> str:
@@ -93,6 +103,7 @@ class AIDYCAIWindow:
         self.active_conversation: Conversation | None = None
         self._next_conversation_id = 1
         self._project_runners: dict[str, ProjectRunner] = {}
+        self.work_items = WorkItemStore()
 
         self._build_ui()
         self.new_conversation()
@@ -147,6 +158,16 @@ class AIDYCAIWindow:
 
         self.project_box = ctk.CTkScrollableFrame(self.sidebar, fg_color="#111C31")
         self.project_box.pack(fill="both", expand=True, padx=10)
+
+        ctk.CTkLabel(self.sidebar, text="CENTRO DE TRABAJO", anchor="w",
+                     text_color="#94A3B8", font=ctk.CTkFont(size=12, weight="bold")).pack(fill="x", padx=20, pady=(12, 8))
+        module_row = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        module_row.pack(fill="x", padx=12, pady=(0, 10))
+        for i, (label, tab) in enumerate((("Tareas", "Tareas"), ("Órdenes", "Órdenes"), ("Incidencias", "Incidencias"))):
+            module_row.grid_columnconfigure(i, weight=1)
+            ctk.CTkButton(module_row, text=label, height=32,
+                          fg_color="#1E293B", hover_color="#334155",
+                          command=lambda t=tab: self._show_section(t)).grid(row=0, column=i, padx=2, sticky="ew")
 
         self.refresh_button = ctk.CTkButton(
             self.sidebar, text="Actualizar proyectos", height=36,
@@ -209,6 +230,15 @@ class AIDYCAIWindow:
         self.result_tabs.add("Búsqueda")
         self.result_tabs.add("Detalles")
         self.result_tabs.add("Diagnóstico")
+        self.result_tabs.add("IDE")
+        self.result_tabs.add("Navegador")
+        self.result_tabs.add("Tareas")
+        self.result_tabs.add("Órdenes")
+        self.result_tabs.add("Incidencias")
+
+        self._build_work_items_tabs()
+        self._build_ide_tab()
+        self._build_browser_tab()
 
         conversation_tab = self.result_tabs.tab("Conversación")
         conversation_tab.grid_columnconfigure(0, weight=1)
@@ -272,7 +302,8 @@ class AIDYCAIWindow:
         # con las acciones generales: ambas capas en row=3 ocultaban los botones
         # dinámicos de Ejecutar/Publicar/Deploy/Release.
         self.project_actions_frame = ctk.CTkFrame(
-            self.main, fg_color=("#E2E8F0", "#111827"), corner_radius=10
+            self.main, fg_color=("#FFFFFF", "#111827"), corner_radius=10,
+            border_width=1, border_color=("#E2E8F0", "#24324A")
         )
         self.project_actions_frame.grid(row=3, column=0, sticky="ew", padx=28, pady=(0, 8))
 
@@ -313,6 +344,276 @@ class AIDYCAIWindow:
         self.log = ctk.CTkTextbox(self.main, height=105, wrap="word", fg_color=("#E2E8F0", "#111827"), text_color=("#0F172A", "#E2E8F0"))
         self.log.grid(row=6, column=0, sticky="ew", padx=28, pady=(0, 18))
         self.log.configure(state="disabled")
+
+    def _show_section(self, tab_name: str) -> None:
+        if hasattr(self, "result_tabs"):
+            self.result_tabs.set(tab_name)
+
+    def _build_work_items_tabs(self) -> None:
+        for kind, tab_name in (("Tarea", "Tareas"), ("Orden", "Órdenes"), ("Incidencia", "Incidencias")):
+            tab = self.result_tabs.tab(tab_name)
+            tab.grid_columnconfigure(0, weight=1)
+            tab.grid_rowconfigure(1, weight=1)
+            header = self.ctk.CTkFrame(tab, fg_color="transparent")
+            header.grid(row=0, column=0, sticky="ew", padx=16, pady=16)
+            header.grid_columnconfigure(0, weight=1)
+            self.ctk.CTkLabel(header, text=tab_name, anchor="w", font=self.ctk.CTkFont(size=22, weight="bold")).grid(row=0, column=0, sticky="w")
+            self.ctk.CTkButton(header, text=f"+ Nueva {kind.lower()}", width=150, height=36,
+                               command=lambda k=kind: self._new_work_item(k)).grid(row=0, column=1)
+            box = self.ctk.CTkScrollableFrame(tab, fg_color=("#F8FAFC", "#0F172A"))
+            box.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
+            setattr(self, f"{kind.lower()}_box", box)
+        self._refresh_work_items()
+
+    def _refresh_work_items(self) -> None:
+        for kind in ("Tarea", "Orden", "Incidencia"):
+            box = getattr(self, f"{kind.lower()}_box", None)
+            if box is None:
+                continue
+            for widget in box.winfo_children():
+                widget.destroy()
+            items = [x for x in self.work_items.load() if x.kind == kind]
+            if not items:
+                self.ctk.CTkLabel(box, text=f"No hay {kind.lower()}s todavía.", text_color=("#64748B", "#94A3B8")).pack(anchor="w", padx=16, pady=20)
+                continue
+            for item in reversed(items):
+                card = self.ctk.CTkFrame(box, fg_color=("#FFFFFF", "#172033"), corner_radius=10,
+                                         border_width=1, border_color=("#E2E8F0", "#334155"))
+                card.pack(fill="x", padx=8, pady=6)
+                left = self.ctk.CTkFrame(card, fg_color="transparent")
+                left.pack(side="left", fill="x", expand=True, padx=14, pady=10)
+                self.ctk.CTkLabel(left, text=f"#{item.id}  {item.title}", anchor="w",
+                                  font=self.ctk.CTkFont(size=14, weight="bold")).pack(anchor="w")
+                meta = " · ".join(x for x in (item.project, item.priority, item.status) if x)
+                self.ctk.CTkLabel(left, text=meta, anchor="w", text_color=("#64748B", "#94A3B8")).pack(anchor="w", pady=(3, 0))
+                if item.description:
+                    self.ctk.CTkLabel(left, text=item.description, anchor="w", justify="left", wraplength=600).pack(anchor="w", pady=(4, 0))
+                self.ctk.CTkButton(card, text="✓", width=38, command=lambda i=item.id: self._complete_work_item(i)).pack(side="right", padx=(4, 12), pady=12)
+                self.ctk.CTkButton(card, text="×", width=38, fg_color=("#F1F5F9", "#334155"), text_color=("#0F172A", "#F8FAFC"),
+                                   command=lambda i=item.id: self._delete_work_item(i)).pack(side="right", padx=4, pady=12)
+
+    def _new_work_item(self, kind: str) -> None:
+        win = self.ctk.CTkToplevel(self.root)
+        win.title(f"Nueva {kind.lower()}")
+        win.geometry("520x430")
+        win.transient(self.root)
+        win.grab_set()
+        frame = self.ctk.CTkFrame(win, fg_color="transparent")
+        frame.pack(fill="both", expand=True, padx=24, pady=24)
+        self.ctk.CTkLabel(frame, text=f"Nueva {kind.lower()}", font=self.ctk.CTkFont(size=20, weight="bold")).pack(anchor="w", pady=(0, 16))
+        title = self.ctk.CTkEntry(frame, placeholder_text="Título")
+        title.pack(fill="x", pady=6)
+        project = self.ctk.CTkEntry(frame, placeholder_text="Proyecto (opcional)")
+        project.pack(fill="x", pady=6)
+        priority = self.ctk.CTkComboBox(frame, values=["Baja", "Media", "Alta", "Crítica"])
+        priority.set("Media")
+        priority.pack(fill="x", pady=6)
+        desc = self.ctk.CTkTextbox(frame, height=130, wrap="word")
+        desc.pack(fill="both", expand=True, pady=6)
+        def save() -> None:
+            if not title.get().strip():
+                messagebox.showwarning("AIDYCAI", "Escribe un título.", parent=win)
+                return
+            self.work_items.create(kind, title.get(), desc.get("1.0", "end").strip(), project.get(), priority.get())
+            self._refresh_work_items()
+            win.destroy()
+        self.ctk.CTkButton(frame, text="Crear", height=38, command=save).pack(fill="x", pady=(10, 0))
+
+    def _complete_work_item(self, item_id: int) -> None:
+        self.work_items.update_status(item_id, "Completada")
+        self._refresh_work_items()
+
+    def _delete_work_item(self, item_id: int) -> None:
+        self.work_items.delete(item_id)
+        self._refresh_work_items()
+
+    def _build_ide_tab(self) -> None:
+        """Build a lightweight local IDE using Tk/CustomTkinter primitives.
+
+        It deliberately edits files in-place inside the selected project only; it
+        does not copy, index, or modify external projects unless the user saves.
+        """
+        tab = self.result_tabs.tab("IDE")
+        tab.grid_columnconfigure(0, weight=0, minsize=280)
+        tab.grid_columnconfigure(1, weight=1)
+        tab.grid_rowconfigure(1, weight=1)
+
+        toolbar = self.ctk.CTkFrame(tab, fg_color="transparent")
+        toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=(8, 4))
+        self.ide_path_label = self.ctk.CTkLabel(toolbar, text="Ningún archivo seleccionado", anchor="w")
+        self.ide_path_label.pack(side="left", fill="x", expand=True)
+        self.ide_save_button = self.ctk.CTkButton(toolbar, text="Guardar", width=90, command=self._save_editor_file)
+        self.ide_save_button.pack(side="right", padx=4)
+        self.ide_reload_button = self.ctk.CTkButton(toolbar, text="Recargar", width=90, command=self._reload_editor_file)
+        self.ide_reload_button.pack(side="right", padx=4)
+        self.ide_open_button = self.ctk.CTkButton(toolbar, text="Abrir externo", width=105, command=self._open_editor_external)
+        self.ide_open_button.pack(side="right", padx=4)
+
+        tree_frame = self.ctk.CTkFrame(tab, fg_color=("#FFFFFF", "#111827"))
+        tree_frame.grid(row=1, column=0, sticky="nsew", padx=(8, 4), pady=(4, 8))
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+        self.file_tree = ttk.Treeview(tree_frame, show="tree")
+        self.file_tree.grid(row=0, column=0, sticky="nsew")
+        tree_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.file_tree.yview)
+        tree_scroll.grid(row=0, column=1, sticky="ns")
+        self.file_tree.configure(yscrollcommand=tree_scroll.set)
+        self.file_tree.bind("<<TreeviewOpen>>", self._expand_tree_node)
+        self.file_tree.bind("<Double-1>", self._open_tree_file)
+
+        editor_frame = self.ctk.CTkFrame(tab, fg_color=("#FFFFFF", "#111827"))
+        editor_frame.grid(row=1, column=1, sticky="nsew", padx=(4, 8), pady=(4, 8))
+        editor_frame.grid_rowconfigure(0, weight=1)
+        editor_frame.grid_columnconfigure(0, weight=1)
+        self.editor = self.ctk.CTkTextbox(editor_frame, wrap="none", undo=True,
+                                          fg_color=("#FFFFFF", "#0B1120"),
+                                          text_color=("#0F172A", "#F8FAFC"),
+                                          font=("Consolas", 12))
+        self.editor.grid(row=0, column=0, sticky="nsew")
+        editor_y = ttk.Scrollbar(editor_frame, orient="vertical", command=self.editor.yview)
+        editor_y.grid(row=0, column=1, sticky="ns")
+        self.editor.configure(yscrollcommand=editor_y.set)
+        self._editor_file: Path | None = None
+
+    def _build_browser_tab(self) -> None:
+        """Provide a browser control center without embedding a second browser engine.
+
+        ChatGPT/Kimi and modern web apps require a full browser engine, so AIDYCAI
+        launches the user's default browser rather than pretending to be a browser.
+        """
+        tab = self.result_tabs.tab("Navegador")
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(2, weight=1)
+        row = self.ctk.CTkFrame(tab, fg_color="transparent")
+        row.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 6))
+        row.grid_columnconfigure(0, weight=1)
+        self.browser_url = self.ctk.CTkEntry(row, height=40, placeholder_text="https://...")
+        self.browser_url.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.ctk.CTkButton(row, text="Abrir", width=90, command=self._open_browser_url).grid(row=0, column=1)
+
+        presets = self.ctk.CTkFrame(tab, fg_color="transparent")
+        presets.grid(row=1, column=0, sticky="ew", padx=12, pady=6)
+        for col in range(5):
+            presets.grid_columnconfigure(col, weight=1)
+        links = [
+            ("ChatGPT", "https://chatgpt.com"),
+            ("Kimi", "https://www.kimi.com"),
+            ("GitHub", "https://github.com"),
+            ("PythonAnywhere", "https://www.pythonanywhere.com"),
+            ("Proyecto", None),
+        ]
+        for col, (label, url) in enumerate(links):
+            command = self._open_selected_project_url if url is None else lambda u=url: self._open_web_url(u)
+            self.ctk.CTkButton(presets, text=label, command=command).grid(row=0, column=col, padx=3, sticky="ew")
+
+        self.browser_info = self.ctk.CTkLabel(
+            tab,
+            text="Navegador externo: AIDYCAI conserva el workspace y abre el navegador completo del sistema para sitios modernos.",
+            anchor="nw", justify="left",
+        )
+        self.browser_info.grid(row=2, column=0, sticky="nw", padx=14, pady=14)
+
+    def _populate_file_tree(self, project) -> None:
+        if not hasattr(self, "file_tree"):
+            return
+        self.file_tree.delete(*self.file_tree.get_children())
+        root_path = project.path
+        if not root_path.is_dir():
+            return
+        root_id = self.file_tree.insert("", "end", text=root_path.name, values=(str(root_path),), open=True)
+        self._insert_tree_children(root_id, root_path)
+
+    def _insert_tree_children(self, node_id: str, path: Path) -> None:
+        for child in visible_children(path, DEFAULT_IGNORED_DIRS):
+            if child.is_dir():
+                item = self.file_tree.insert(node_id, "end", text=f"📁 {child.name}", values=(str(child),))
+                self.file_tree.insert(item, "end", text="…")
+            else:
+                self.file_tree.insert(node_id, "end", text=child.name, values=(str(child),))
+
+    def _expand_tree_node(self, _event=None) -> None:
+        selection = self.file_tree.selection()
+        if not selection:
+            return
+        node = selection[0]
+        values = self.file_tree.item(node, "values")
+        if not values:
+            return
+        path = Path(values[0])
+        if not path.is_dir():
+            return
+        children = self.file_tree.get_children(node)
+        if len(children) == 1 and self.file_tree.item(children[0], "text") == "…":
+            self.file_tree.delete(children[0])
+            self._insert_tree_children(node, path)
+
+    def _open_tree_file(self, _event=None) -> None:
+        selection = self.file_tree.selection()
+        if not selection:
+            return
+        values = self.file_tree.item(selection[0], "values")
+        if not values:
+            return
+        path = Path(values[0])
+        if path.is_dir():
+            return
+        if not is_probably_text(path):
+            messagebox.showinfo("AIDYCAI", "Este archivo no parece ser de texto. Puedes abrirlo con la aplicación del sistema.", parent=self.root)
+            return
+        try:
+            text = read_text_file(path)
+        except Exception as exc:
+            messagebox.showerror("AIDYCAI", str(exc), parent=self.root)
+            return
+        self._editor_file = path
+        self.ide_path_label.configure(text=str(path))
+        self.editor.delete("1.0", "end")
+        self.editor.insert("1.0", text)
+
+    def _save_editor_file(self) -> None:
+        if self._editor_file is None:
+            return
+        try:
+            write_text_file(self._editor_file, self.editor.get("1.0", "end-1c"))
+            self._log(f"[OK] Archivo guardado: {self._editor_file}")
+        except Exception as exc:
+            messagebox.showerror("AIDYCAI", f"No se pudo guardar: {exc}", parent=self.root)
+
+    def _reload_editor_file(self) -> None:
+        if self._editor_file is None:
+            return
+        try:
+            text = read_text_file(self._editor_file)
+            self.editor.delete("1.0", "end")
+            self.editor.insert("1.0", text)
+        except Exception as exc:
+            messagebox.showerror("AIDYCAI", str(exc), parent=self.root)
+
+    def _open_editor_external(self) -> None:
+        if self._editor_file and self._editor_file.exists():
+            os.startfile(str(self._editor_file)) if os.name == "nt" else webbrowser.open(self._editor_file.as_uri())
+
+    def _open_web_url(self, url: str) -> None:
+        self.browser_url.delete(0, "end")
+        self.browser_url.insert(0, url)
+        webbrowser.open(url, new=2)
+
+    def _open_browser_url(self) -> None:
+        url = self.browser_url.get().strip()
+        if not url:
+            return
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+        self._open_web_url(url)
+
+    def _open_selected_project_url(self) -> None:
+        if not self.selected_project:
+            return
+        actions = self._actions_for(self.selected_project)
+        if not actions.url:
+            messagebox.showinfo("AIDYCAI", "Este proyecto no tiene una URL local configurada.", parent=self.root)
+            return
+        self._open_web_url(actions.url)
 
     def _log(self, message: str) -> None:
         self.log.configure(state="normal")
@@ -517,25 +818,31 @@ class AIDYCAIWindow:
     def _render_project_actions(self, project) -> None:
         self._clear_project_action_buttons()
         actions = self._actions_for(project)
+        self.project_actions_frame.grid_columnconfigure(0, weight=1)
+        title = self.ctk.CTkLabel(self.project_actions_frame, text="Acciones del proyecto", anchor="w",
+                                  font=self.ctk.CTkFont(size=12, weight="bold"),
+                                  text_color=("#475569", "#94A3B8"))
+        title.grid(row=0, column=0, sticky="w", padx=14, pady=(8, 2))
+        row = self.ctk.CTkFrame(self.project_actions_frame, fg_color="transparent")
+        row.grid(row=1, column=0, sticky="ew", padx=8, pady=(2, 8))
+        for col in range(6):
+            row.grid_columnconfigure(col, weight=1)
         buttons = []
         if actions.can_execute:
-            buttons.append(("▶ Ejecutar", lambda p=project, a=actions: self._execute_project(p, a)))
-            buttons.append(("■ Detener", lambda p=project: self._stop_project(p)))
-        buttons.append(("↻ Recargar", lambda p=project, a=actions: self._reload_project(p, a)))
+            buttons.extend([("Ejecutar", lambda p=project, a=actions: self._execute_project(p, a)),
+                            ("Detener", lambda p=project: self._stop_project(p))])
+        buttons.append(("Recargar", lambda p=project, a=actions: self._reload_project(p, a)))
         if actions.can_publish:
-            buttons.append(("↑ Publicar", lambda p=project, a=actions: self._publish_project(p, a, False)))
+            buttons.append(("Publicar", lambda p=project, a=actions: self._publish_project(p, a, False)))
         if actions.can_deploy:
-            buttons.append(("↑ Publicar + Deploy", lambda p=project, a=actions: self._publish_project(p, a, True)))
-            buttons.append(("↻ Solo Deploy PA", lambda p=project, a=actions: self._deploy_only(p, a)))
+            buttons.append(("Publicar + Deploy", lambda p=project, a=actions: self._publish_project(p, a, True)))
+            buttons.append(("Deploy", lambda p=project, a=actions: self._deploy_only(p, a)))
         if actions.can_build:
-            buttons.append(("⚙ Compilar EXE / Release", lambda p=project, a=actions: self._build_release(p, a)))
+            buttons.append(("Compilar EXE", lambda p=project, a=actions: self._build_release(p, a)))
         for col, (text, command) in enumerate(buttons):
-            self.project_actions_frame.grid_columnconfigure(col, weight=1)
-            self.ctk.CTkButton(
-                self.project_actions_frame, text=text, height=36, command=command,
-                fg_color=("#FFFFFF", "#1E293B"), hover_color=("#CBD5E1", "#334155"),
-                text_color=("#0F172A", "#F8FAFC"),
-            ).grid(row=0, column=col, padx=5, pady=6, sticky="ew")
+            self.ctk.CTkButton(row, text=text, height=34, command=command,
+                               fg_color=("#F8FAFC", "#1E293B"), hover_color=("#E2E8F0", "#334155"),
+                               text_color=("#0F172A", "#F8FAFC")).grid(row=0, column=col, padx=3, sticky="ew")
 
     def _execute_project(self, project, actions: ProjectActions) -> None:
         runner = self._project_runners.setdefault(project.id, ProjectRunner())
@@ -556,15 +863,12 @@ class AIDYCAIWindow:
         if not runner:
             self._log(f"[INFO] {project.name} no tiene un proceso activo.")
             return
-        self._log(f"[INFO] Deteniendo {project.name}...")
-        self._set_status(f"Deteniendo {project.name}...")
-        def operation():
+        try:
             runner.stop_project()
-            return True
-        def success(_result):
             self._log(f"[OK] Proceso detenido: {project.name}")
             self._set_status("Listo")
-        self._run_background(operation, success, f"Deteniendo {project.name}")
+        except Exception as exc:
+            self._log(f"[ERROR] {exc}")
 
     def _publish_project(self, project, actions: ProjectActions, deploy: bool) -> None:
         from tkinter import simpledialog, messagebox
@@ -621,6 +925,12 @@ class AIDYCAIWindow:
         self.project_label.configure(text=project.name)
         self._set_status("Listo")
         self._render_project_actions(project)
+        self._populate_file_tree(project)
+        if hasattr(self, "browser_url"):
+            actions = self._actions_for(project)
+            self.browser_url.delete(0, "end")
+            if actions.url:
+                self.browser_url.insert(0, actions.url)
         self._log(f"[INFO] Proyecto seleccionado: {project.name}")
 
     def _require_project(self):

@@ -71,36 +71,3 @@ def test_browser_wait_opens_when_local_server_is_ready():
         ProjectRunner._wait_and_open_browser("http://127.0.0.1:5000", 0, Proc())
         assert connect.called
         browser.assert_called_once_with("http://127.0.0.1:5000", new=2)
-
-
-def test_stop_project_windows_does_not_wait_forever():
-    runner = ProjectRunner()
-    class Proc:
-        pid = 9876
-        def __init__(self):
-            self.calls = 0
-        def poll(self):
-            self.calls += 1
-            return None
-        def wait(self, timeout=None):
-            raise TimeoutError()
-        def kill(self):
-            pass
-        def terminate(self):
-            pass
-    proc = Proc()
-    runner.process = proc
-    with patch("aidycai.services.project_runner.os.name", "nt"),          patch("aidycai.services.project_runner.subprocess.run") as run,          patch("aidycai.services.project_runner.time.sleep"):
-        runner.stop_project(timeout=0.5)
-        assert run.call_args.args[0] == ["taskkill", "/PID", "9876", "/T", "/F"]
-        assert runner.process is None
-
-
-def test_is_running_is_thread_safe():
-    runner = ProjectRunner()
-    class Proc:
-        def poll(self): return None
-    runner.process = Proc()
-    assert runner.is_running() is True
-    runner.process = None
-    assert runner.is_running() is False

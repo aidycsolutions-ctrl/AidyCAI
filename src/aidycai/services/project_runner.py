@@ -39,6 +39,11 @@ class ProjectRunner:
         for candidate in candidates:
             if candidate.is_file():
                 return candidate
+        if raw.lower() == "auto":
+            # ``auto`` means: use the project's venv when present, otherwise
+            # fall back to the interpreter running AIDYCAI. This keeps generic
+            # projects runnable while still preferring their isolated env.
+            return Path(sys.executable)
         raise FileNotFoundError(
             "No se encontró el Python del entorno virtual. Rutas comprobadas: "
             + ", ".join(str(d) for d in env_dirs)
@@ -81,8 +86,6 @@ class ProjectRunner:
 
             creationflags = 0
             if os.name == "nt":
-                # Cada aplicación queda en su propio grupo. Esto permite terminar
-                # también los procesos creados por Flask/Werkzeug (reloader).
                 creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
             self.executable = python_exe
             self.process = subprocess.Popen(
@@ -131,79 +134,50 @@ class ProjectRunner:
             webbrowser.open(url, new=2)
 
     def stop_project(self, timeout: float = 5.0) -> None:
-        """Detiene el proceso y todo su árbol sin bloquear la interfaz.
-
-        En Windows, Flask/Werkzeug puede crear un proceso hijo para el
-        reloader. ``terminate()`` sobre el padre no basta; ``taskkill /T``
-        termina el árbol completo. El comando se ejecuta con timeout para
-        evitar que el botón quede atrapado si Windows tarda en responder.
-        """
         with self._lock:
             process = self.process
-        if process is None:
+        if not process:
             return
-
-        pid = getattr(process, "pid", None)
-        if not pid:
+        if process.poll() is not None:
             with self._lock:
                 if self.process is process:
                     self.process = None
-                    self.executable = None
             return
-
+        pid = process.pid
         try:
-            if process.poll() is None:
+            if os.name == "nt":
+                # taskkill /T alcanza también al Flask/Werkzeug reloader y a procesos
+                # hijos. CREATE_NO_WINDOW evita que detener genere una consola adicional.
+                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                result = subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    capture_output=True, text=True, check=False,
+                    creationflags=creationflags,
+                )
+                if result.returncode != 0 and process.poll() is None:
+                    process.terminate()
+            else:
+                try:
+                    os.killpg(os.getpgid(pid), 15)
+                except (ProcessLookupError, PermissionError, OSError):
+                    process.terminate()
+            try:
+                process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
                 if os.name == "nt":
-                    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                    try:
-                        subprocess.run(
-                            ["taskkill", "/PID", str(pid), "/T", "/F"],
-                            stdin=subprocess.DEVNULL,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                            check=False,
-                            timeout=max(1.0, timeout),
-                            creationflags=flags,
-                        )
-                    except (subprocess.TimeoutExpired, OSError):
-                        # Último recurso: matar el padre sin volver a bloquear.
-                        try:
-                            process.kill()
-                        except OSError:
-                            pass
+                    subprocess.run(
+                        ["taskkill", "/PID", str(pid), "/T", "/F"],
+                        capture_output=True, text=True, check=False,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
                 else:
-                    try:
-                        os.killpg(os.getpgid(pid), 15)
-                    except (ProcessLookupError, PermissionError, OSError):
-                        try:
-                            process.terminate()
-                        except OSError:
-                            pass
-
-                # No esperamos indefinidamente al proceso ni al hilo lector.
-                deadline = time.monotonic() + max(0.5, timeout)
-                while process.poll() is None and time.monotonic() < deadline:
-                    time.sleep(0.05)
-
-                if process.poll() is None:
-                    try:
-                        process.kill()
-                    except OSError:
-                        pass
-                    try:
-                        process.wait(timeout=1.0)
-                    except (subprocess.TimeoutExpired, OSError):
-                        pass
+                    process.kill()
+                process.wait(timeout=3)
         finally:
             with self._lock:
                 if self.process is process:
                     self.process = None
                     self.executable = None
-
-    def is_running(self) -> bool:
-        with self._lock:
-            process = self.process
-        return bool(process and process.poll() is None)
 
     def is_running(self) -> bool:
         return bool(self.process and self.process.poll() is None)

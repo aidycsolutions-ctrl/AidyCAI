@@ -12,9 +12,10 @@ class GitService:
     def __init__(self, repo_path: str | Path) -> None:
         self.repo_path = Path(repo_path)
 
-    def run(self, args: list[str], *, check: bool = True) -> str:
+    def run(self, args, *rest: str, check: bool = True) -> str:
+        command = [args, *rest] if rest else list(args)
         result = subprocess.run(
-            ["git", *args], cwd=self.repo_path, capture_output=True,
+            ["git", *command], cwd=self.repo_path, capture_output=True,
             text=True, encoding="utf-8", errors="replace",
         )
         output = (result.stdout or "")
@@ -67,6 +68,22 @@ class GitService:
                 committed = True
         self.run(["push", "-u", "origin", branch])
         return {"committed": committed, "branch": branch, "status_before": status_before}
+
+    def publish_main(self, message: str) -> dict[str, str | bool]:
+        """Backward-compatible main-branch publisher for older integrations."""
+        if not message.strip():
+            raise GitError("El mensaje de commit no puede estar vacío.")
+        branch_result = self.run("branch", "--show-current")
+        current = branch_result.stdout.strip() if hasattr(branch_result, "stdout") else str(branch_result).strip()
+        if current and current != "main":
+            raise GitError(f"La rama actual es '{current}', no 'main'.")
+        status = self.status_porcelain()
+        self.run("fetch", "origin", "main")
+        if status.strip():
+            self.run("add", ".")
+            self.run("commit", "-m", message)
+        self.run("push", "origin", "main")
+        return {"committed": bool(status.strip()), "branch": "main", "status_before": status}
 
     def reload(self, branch: str = "main") -> str:
         if self.has_changes():
