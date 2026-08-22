@@ -18,3 +18,12 @@
 - Adaptadores externos Codex/OpenAI/Anthropic.
 - Modificaciones al proyecto AIDYC analizado.
 - Inferencia dinámica de SQL construido en runtime.
+
+## Fase 3 — Gestión de proyectos
+
+- Configuración declarativa de ejecución, publicación, deploy y GitHub Actions por proyecto.
+- Botones GUI: Ejecutar, Detener, Recargar, Publicar, Publicar + Deploy, Solo Deploy PA y Compilar EXE/Release.
+- `GitService` con sincronización segura `fetch` + `ff-only` y rechazo de divergencias.
+- `SSHService` para deploy remoto sin modificar los proyectos externos desde AIDYCAI.
+- `GitHubActionsService` soporta `workflow_dispatch` con inputs, incluyendo `version` de `main.yml`.
+- `ProjectRunner` captura stdout/stderr y permite detener procesos.

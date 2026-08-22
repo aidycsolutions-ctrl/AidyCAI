@@ -6,8 +6,9 @@ from types import TracebackType
 
 from aidycai.application.context_engine import ContextEngine
 from aidycai.application.defaults import DEFAULT_PROJECTS
+from aidycai.application.project_actions import ProjectActions, serialize_actions
 from aidycai.application.indexer import IndexService
-from aidycai.application.registry import ProjectRegistry
+from aidycai.application.registry import ProjectRegistry, utcnow
 from aidycai.application.system import SystemInfo, build_system_info
 from aidycai.domain.exceptions import DuplicateProjectError, InvalidPathError
 from aidycai.domain.models import Project
@@ -87,6 +88,7 @@ def open_app(layout: DataLayout | None = None, *, seed: bool | None = None) -> A
     should_seed = skip_seed() is False if seed is None else seed
     if should_seed:
         seed_default_projects(context)
+    repair_default_project_paths(context)
     return context
 
 
@@ -105,6 +107,31 @@ def seed_default_projects(context: AppContext) -> list[Project]:
             logger.warning("No se pudo registrar %s: %s", spec.name, exc)
             continue
         context.ensure_project_data(project.id)
+        if spec.actions != ProjectActions():
+            context.registry.set_setting(project.id, "actions", serialize_actions(spec.actions))
         logger.info("Registrado proyecto por defecto %s -> %s", project.name, project.path)
         seeded.append(project)
     return seeded
+
+
+def repair_default_project_paths(context: AppContext) -> None:
+    """Repair only stale built-in paths when the new default path exists.
+
+    This does not overwrite a valid custom project path.
+    """
+    current = {p.id: p for p in context.registry.list_projects()}
+    for spec in DEFAULT_PROJECTS:
+        project = current.get(spec.name.lower().replace(" ", "-"))
+        if project is None:
+            continue
+        if project.path.exists():
+            continue
+        if not spec.path.exists():
+            continue
+        try:
+            context.registry.set_path(project.id, spec.path, require_existing=True)
+            context.ensure_project_data(project.id)
+            context.registry.set_setting(project.id, "actions", serialize_actions(spec.actions))
+            logger.info("Ruta reparada para %s -> %s", project.name, spec.path)
+        except Exception as exc:
+            logger.warning("No se pudo reparar la ruta de %s: %s", project.name, exc)

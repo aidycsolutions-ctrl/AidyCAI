@@ -1,120 +1,257 @@
 # AIDYCAI
 
-Capa local de inteligencia para desarrollo de software. No es un clon de Cursor.
+AIDYCAI es el centro local de análisis, ejecución y gestión de los proyectos de desarrollo asociados a AIDYC.
 
-La Fase 1 registra proyectos. La Fase 2 construye un índice local (SQLite + AST de Python + FTS5) para buscar código sin tokens ni LLM.
+## Estado actual
 
-## Requisitos
+Esta versión incluye:
 
-- Windows (desarrollado y probado en Windows 11)
-- Python 3.12
+- Análisis causal determinista V14, V15, V16 y V16.1.
+- `EvidenceRecord` y `AIHandoff v1`.
+- Trazado causal de lector SQL → escritor SQL → símbolo determinante.
+- Gestión de proyectos mediante configuración editable.
+- Ejecución de proyectos desde la interfaz.
+- Detención de procesos y procesos hijos en Windows.
+- Apertura automática del navegador para proyectos web.
+- Publicación Git/GitHub.
+- Deploy mediante SSH cuando el proyecto lo tenga configurado.
+- Recarga/reindexación.
+- Preparación para compilación mediante GitHub Actions.
+- Exploración y gestión centralizada de proyectos.
 
-## Instalación
+## Proyectos gestionados
 
-Desde `Documents\AIDYCAI`:
+La configuración de los proyectos NO está escrita directamente en el código.
 
-```text
-python -m venv .venv
-.venv\Scripts\activate
-pip install -e ".[dev]"
-```
-
-## Ubicación de datos
-
-El código fuente permanece en:
-
-```text
-Documents\AIDYCAI
-```
-
-Los datos generados van a `%LOCALAPPDATA%\AIDYCAI` (fuera de OneDrive):
+Se encuentra en:
 
 ```text
-%LOCALAPPDATA%\AIDYCAI\
-├── database\aidycai.sqlite
-├── projects\<id>\index.sqlite
-├── logs\
-└── cache\
+config/projects.json
 ```
 
-Para tests o una instalación alternativa:
+Esto permite cambiar rutas, comandos, entornos virtuales, URLs y capacidades sin modificar AIDYCAI.
+
+Ejemplo conceptual:
+
+```json
+{
+  "name": "AIDYCWeb",
+  "path": "C:\ruta\del\proyecto",
+  "python": "venv",
+  "command": "python Aidyc_app.py",
+  "url": "http://127.0.0.1:5000"
+}
+```
+
+## Entornos virtuales
+
+Para cada proyecto se puede indicar el entorno virtual que debe utilizarse.
+
+AIDYCAI debe ejecutar directamente el `python.exe` del entorno virtual cuando esté configurado.
+
+Por ejemplo:
 
 ```text
-set AIDYCAI_DATA_DIR=C:\ruta\temporal
-set AIDYCAI_SKIP_SEED=1
+venv\Scripts\python.exe
 ```
 
-## Proyectos registrados por defecto
-
-En el primer arranque (si el registro está vacío) se intentan registrar estas rutas reales:
-
-| Nombre | Ruta |
-|---|---|
-| AIDYC | `Documents\Aidyc` |
-| AIDYCWeb | `Documents\AidyCWeb\AidyC-web` |
-| catalog-studio | `Documents\Deuna\catalog-studio` |
-| deunacolombia | `Documents\Deuna\deunacolombia` |
-
-Registrar o borrar un proyecto **nunca** copia ni elimina esas carpetas.
-
-## Comandos
+o:
 
 ```text
-aidycai project list
-aidycai project info AIDYC
-aidycai project add MiProyecto C:\ruta\original
-aidycai project add MiProyecto C:\ruta\original --exclude uploads
-aidycai project remove MiProyecto
-aidycai project enable AIDYC
-aidycai project disable AIDYC
-aidycai project set-path AIDYC C:\nueva\ruta
-aidycai system info
-aidycai index AIDYC
-aidycai index --all
-aidycai index info AIDYC
-aidycai search AIDYC "factura"
-aidycai context AIDYC "¿Dónde se calcula el total de una factura?"
-aidycai context AIDYC "¿Dónde se calcula el IVA?" --output context.json
+.venv\Scripts\python.exe
 ```
 
-La primera `index` analiza. La segunda, sin cambios en disco, debe reportar casi todos los archivos **sin cambios**.
+No es necesario activar manualmente el entorno mediante PowerShell para ejecutar el proyecto desde AIDYCAI.
 
-Más detalle: [docs/index.md](docs/index.md) y [docs/context.md](docs/context.md).
+## Ejecutar proyectos
 
-La primera `index` analiza. La segunda, sin cambios en disco, debe reportar casi todos los archivos **sin cambios**.
+Desde la interfaz:
 
-Más detalle: [docs/index.md](docs/index.md).
+```text
+▶ EJECUTAR
+```
+
+AIDYCAI inicia el comando configurado utilizando el entorno virtual del proyecto.
+
+Para aplicaciones web configuradas con una URL, AIDYCAI espera a que el servidor esté disponible y puede abrir automáticamente el navegador.
+
+## Detener proyectos
+
+El botón:
+
+```text
+■ DETENER
+```
+
+termina el proceso del proyecto y, en Windows, su árbol de procesos.
+
+Esto es especialmente importante para aplicaciones Flask/Werkzeug que pueden crear procesos hijos mediante el reloader.
+
+La detención se ejecuta sin bloquear la interfaz principal de AIDYCAI.
+
+Después de detener un proyecto, debe ser posible volver a utilizar:
+
+```text
+▶ EJECUTAR
+```
+
+sin cerrar AIDYCAI.
+
+## Navegador
+
+Las aplicaciones web pueden tener una URL configurada en `projects.json`.
 
 Ejemplo:
 
 ```text
-aidycai project list
-aidycai project info AIDYC
+http://127.0.0.1:5000
 ```
 
-## Estructura del código
+AIDYCAI puede abrir esa dirección una vez que el servidor esté disponible.
+
+## Publicación
+
+Las operaciones Git se gestionan desde AIDYCAI utilizando la configuración del proyecto.
+
+Las operaciones pueden incluir:
+
+- comprobar cambios;
+- guardar temporalmente cambios locales cuando corresponda;
+- sincronizar con `origin/main`;
+- commit;
+- push.
+
+## Deploy
+
+Los proyectos que tengan deploy configurado pueden ejecutar el servicio SSH correspondiente.
+
+Los proyectos sin deploy deben permanecer configurados como:
+
+```text
+deploy: false
+```
+
+No se deben introducir credenciales directamente en el código.
+
+## GitHub Actions
+
+AIDYCAI puede consultar un workflow configurado en GitHub y solicitar su ejecución cuando el proyecto tenga esa capacidad.
+
+Las credenciales de GitHub deben proporcionarse mediante variables de entorno, por ejemplo:
+
+```text
+GITHUB_TOKEN
+```
+
+No guardar tokens dentro de `projects.json` ni dentro del código fuente.
+
+## Análisis causal
+
+El motor V16.1 permite continuar una cadena causal desde una lectura SQL hacia sus escritores cuando la relación puede resolverse determinísticamente.
+
+Ejemplo:
+
+```text
+VisualizacionValores.__init__
+    ↓
+cargar_datos
+    ↓
+obtener_valores_ultimo_turno
+    ↓
+SQL_READ: Retiros_Caja
+    ↓
+SQL_WRITE: RegistrarRetiro.guardar_retiro
+    ↓
+TurnoService.obtener_turno_actual
+```
+
+Cuando existen varios escritores candidatos sin una resolución determinista, AIDYCAI no debe elegir arbitrariamente.
+
+La cadena debe quedar como ambigua o no resuelta según corresponda.
+
+## Compatibilidad
+
+Las versiones V14, V15 y V16 existentes deben conservar su compatibilidad.
+
+Los bundles anteriores deben poder seguir siendo procesados cuando no contengan información introducida posteriormente.
+
+AIHandoff v1 mantiene su contrato de compatibilidad.
+
+## Proyectos externos
+
+AIDYCAI analiza y gestiona proyectos externos, pero sus cambios deben realizarse únicamente cuando el usuario los solicite explícitamente.
+
+La implementación de AIDYCAI no debe modificar automáticamente:
+
+- AIDYC
+- AIDYCWeb
+- Deuna
+
+## Inicio de AIDYCAI
+
+En Windows puede utilizarse el archivo:
+
+```text
+AIDYCAI.bat
+```
+
+para iniciar la aplicación sin tener que abrir PowerShell manualmente.
+
+También puede ejecutarse desde el entorno virtual de AIDYCAI:
+
+```powershell
+cd "$HOME\OneDrive\Documents\AIDYCAI"
+.\.venv\Scripts\Activate.ps1
+pip install -e ".[gui]"
+aidycai gui
+```
+
+## Estructura conceptual
 
 ```text
 AIDYCAI/
-├── pyproject.toml
-├── README.md
-├── docs/
-├── src/aidycai/
-│   ├── domain/            reglas y modelos
-│   ├── application/       registro, índice, context engine
-│   ├── infrastructure/    SQLite, scanner, AST Python, FTS5
-│   └── cli/               Typer
-└── tests/
+├── config/
+│   └── projects.json
+├── aidycai/
+│   ├── causal_v14.py
+│   ├── causal_v15.py
+│   ├── causal_v16.py
+│   ├── causal_v16_1.py
+│   ├── evidence.py
+│   ├── ai_handoff.py
+│   ├── indexer.py
+│   ├── services/
+│   ├── infrastructure/
+│   └── ui/
+├── tests/
+├── main.py
+└── AIDYCAI.bat
 ```
 
-El Core no importa Cursor, OpenAI, Anthropic, Ollama ni ningún SDK de LLM.
+## Principios del proyecto
 
-## Tests
+1. AIDYCAI debe trabajar de forma determinista siempre que sea posible.
+2. No utilizar LLM, embeddings ni búsquedas laterales para resolver relaciones que ya pueden determinarse mediante el índice.
+3. Mantener evidencia verificable de cada salto causal.
+4. No seleccionar arbitrariamente entre candidatos ambiguos.
+5. Mantener límites explícitos de profundidad y símbolos.
+6. Mantener compatibilidad con versiones anteriores.
+7. Mantener los proyectos externos aislados de las modificaciones de AIDYCAI.
+8. Mantener las rutas, comandos y capacidades de los proyectos editables mediante configuración.
+9. Evitar credenciales almacenadas en el código o archivos de configuración.
+10. Las operaciones de ejecución, publicación y deploy deben poder controlarse desde una única interfaz.
 
-```text
-pytest
-```
+## Próxima evolución
 
-## Exclusiones del scanner
+La evolución prevista del proyecto es convertir AIDYCAI progresivamente en un workspace de desarrollo integrado, incorporando:
 
-Por defecto ignora `.git`, `.venv`, `node_modules` y `__pycache__`. Cada proyecto puede añadir exclusiones extra (AIDYCWeb incluye `uploads`).
+- explorador de archivos;
+- editor de código;
+- búsqueda dentro de proyectos;
+- integración directa entre editor y análisis causal;
+- visualización de EvidenceRecord;
+- generación de contexto para IA;
+- navegador integrado para herramientas web de desarrollo;
+- workflow centralizado de ejecutar, detener, publicar, deploy y compilar.
+
+Estas funciones deben añadirse de forma incremental sin comprometer la estabilidad de V14/V15/V16/V16.1.

@@ -12,6 +12,13 @@ from typing import Callable
 from aidycai.application.bootstrap import open_app
 from aidycai.application.diagnostics import render_diagnosis, render_human_answer
 from aidycai.domain.context_models import ContextBundle, ROLE_PRIMARY
+from aidycai.application.defaults import DEFAULT_PROJECTS
+from aidycai.application.project_config import get_project_config
+from aidycai.application.project_actions import ProjectActions
+from aidycai.infrastructure.git_service import GitService
+from aidycai.services.project_runner import ProjectRunner
+from aidycai.services.publisher_service import PublisherService
+from aidycai.services.github_actions import GitHubActionsService
 
 
 def format_bytes(value: int) -> str:
@@ -85,6 +92,7 @@ class AIDYCAIWindow:
         self.conversations: list[Conversation] = []
         self.active_conversation: Conversation | None = None
         self._next_conversation_id = 1
+        self._project_runners: dict[str, ProjectRunner] = {}
 
         self._build_ui()
         self.new_conversation()
@@ -260,8 +268,17 @@ class AIDYCAIWindow:
         )
         self.diagnosis_tab_text.pack(fill="both", expand=True, padx=8, pady=8)
 
+        # Acciones del proyecto en una fila exclusiva. No compartir esta fila
+        # con las acciones generales: ambas capas en row=3 ocultaban los botones
+        # dinámicos de Ejecutar/Publicar/Deploy/Release.
+        self.project_actions_frame = ctk.CTkFrame(
+            self.main, fg_color=("#E2E8F0", "#111827"), corner_radius=10
+        )
+        self.project_actions_frame.grid(row=3, column=0, sticky="ew", padx=28, pady=(0, 8))
+
+        # Acciones generales en una fila independiente.
         actions = ctk.CTkFrame(self.main, fg_color="transparent")
-        actions.grid(row=3, column=0, sticky="ew", padx=28, pady=(0, 10))
+        actions.grid(row=4, column=0, sticky="ew", padx=28, pady=(0, 10))
         for i in range(5):
             actions.grid_columnconfigure(i, weight=1)
 
@@ -282,7 +299,7 @@ class AIDYCAIWindow:
         )
 
         progress_frame = ctk.CTkFrame(self.main, fg_color="transparent")
-        progress_frame.grid(row=4, column=0, sticky="ew", padx=28, pady=(0, 8))
+        progress_frame.grid(row=5, column=0, sticky="ew", padx=28, pady=(0, 8))
         progress_frame.grid_columnconfigure(0, weight=1)
         self.progress_label = ctk.CTkLabel(
             progress_frame, text="Listo", anchor="w",
@@ -294,7 +311,7 @@ class AIDYCAIWindow:
         self.progress_bar.set(0)
 
         self.log = ctk.CTkTextbox(self.main, height=105, wrap="word", fg_color=("#E2E8F0", "#111827"), text_color=("#0F172A", "#E2E8F0"))
-        self.log.grid(row=5, column=0, sticky="ew", padx=28, pady=(0, 18))
+        self.log.grid(row=6, column=0, sticky="ew", padx=28, pady=(0, 18))
         self.log.configure(state="disabled")
 
     def _log(self, message: str) -> None:
@@ -476,12 +493,134 @@ class AIDYCAIWindow:
             self.diagnostic_panel.grid_forget()
             self.diagnostic_toggle.configure(text="▸  Mostrar diagnóstico técnico")
 
+    def _actions_for(self, project) -> ProjectActions:
+        spec = get_project_config(project.name)
+        if spec is not None:
+            return ProjectActions(
+                command=spec.command, venv=spec.venv, open_browser=spec.open_browser,
+                url=spec.url, browser_delay=spec.browser_delay, branch=spec.branch,
+                github_owner=spec.github_owner, github_repo=spec.github_repo, publish=spec.publish,
+                deploy=spec.deploy, deploy_user=spec.deploy_user, deploy_host=spec.deploy_host,
+                deploy_path=spec.deploy_path, deploy_script=spec.deploy_script,
+                build_workflow=spec.build_workflow, build_input_name=spec.build_input_name,
+                extra_env=spec.extra_env,
+            )
+        for fallback in DEFAULT_PROJECTS:
+            if fallback.name.lower() == project.name.lower():
+                return fallback.actions
+        return ProjectActions()
+
+    def _clear_project_action_buttons(self) -> None:
+        for widget in self.project_actions_frame.winfo_children():
+            widget.destroy()
+
+    def _render_project_actions(self, project) -> None:
+        self._clear_project_action_buttons()
+        actions = self._actions_for(project)
+        buttons = []
+        if actions.can_execute:
+            buttons.append(("▶ Ejecutar", lambda p=project, a=actions: self._execute_project(p, a)))
+            buttons.append(("■ Detener", lambda p=project: self._stop_project(p)))
+        buttons.append(("↻ Recargar", lambda p=project, a=actions: self._reload_project(p, a)))
+        if actions.can_publish:
+            buttons.append(("↑ Publicar", lambda p=project, a=actions: self._publish_project(p, a, False)))
+        if actions.can_deploy:
+            buttons.append(("↑ Publicar + Deploy", lambda p=project, a=actions: self._publish_project(p, a, True)))
+            buttons.append(("↻ Solo Deploy PA", lambda p=project, a=actions: self._deploy_only(p, a)))
+        if actions.can_build:
+            buttons.append(("⚙ Compilar EXE / Release", lambda p=project, a=actions: self._build_release(p, a)))
+        for col, (text, command) in enumerate(buttons):
+            self.project_actions_frame.grid_columnconfigure(col, weight=1)
+            self.ctk.CTkButton(
+                self.project_actions_frame, text=text, height=36, command=command,
+                fg_color=("#FFFFFF", "#1E293B"), hover_color=("#CBD5E1", "#334155"),
+                text_color=("#0F172A", "#F8FAFC"),
+            ).grid(row=0, column=col, padx=5, pady=6, sticky="ew")
+
+    def _execute_project(self, project, actions: ProjectActions) -> None:
+        runner = self._project_runners.setdefault(project.id, ProjectRunner())
+        if runner.is_running():
+            self._log(f"[WARN] {project.name} ya está ejecutándose.")
+            return
+        def output(line: str) -> None:
+            self.root.after(0, lambda: self._log(f"[{project.name}] {line}"))
+        try:
+            runner.start_project(actions.command or "", project.path, venv=actions.venv, on_output=output, env=actions.extra_env, open_browser=actions.open_browser, url=actions.url, browser_delay=actions.browser_delay)
+            self._set_status(f"{project.name} ejecutándose")
+            self._log(f"[OK] Ejecutando: {actions.command} · Python: {runner.executable}")
+        except Exception as exc:
+            self._log(f"[ERROR] {exc}")
+
+    def _stop_project(self, project) -> None:
+        runner = self._project_runners.get(project.id)
+        if not runner:
+            self._log(f"[INFO] {project.name} no tiene un proceso activo.")
+            return
+        self._log(f"[INFO] Deteniendo {project.name}...")
+        self._set_status(f"Deteniendo {project.name}...")
+        def operation():
+            runner.stop_project()
+            return True
+        def success(_result):
+            self._log(f"[OK] Proceso detenido: {project.name}")
+            self._set_status("Listo")
+        self._run_background(operation, success, f"Deteniendo {project.name}")
+
+    def _publish_project(self, project, actions: ProjectActions, deploy: bool) -> None:
+        from tkinter import simpledialog, messagebox
+        message = simpledialog.askstring("Publicar", f"Mensaje de commit para {project.name}:", parent=self.root)
+        if not message:
+            return
+        def operation():
+            return PublisherService(project.path, actions).publish(message, deploy=deploy)
+        def success(result):
+            self._log(f"[OK] Publicación completada. Commit: {'sí' if result.committed else 'no'} · rama {result.branch} · deploy {'sí' if result.deployed else 'no'}")
+            if deploy:
+                messagebox.showinfo("AIDYCAI", f"{project.name}: publicación y deploy completados.", parent=self.root)
+        self._run_background(operation, success, "Publicando")
+
+    def _deploy_only(self, project, actions: ProjectActions) -> None:
+        def operation():
+            return PublisherService(project.path, actions).deploy_only()
+        def success(output):
+            self._log("[OK] Deploy remoto completado.")
+            if output:
+                self._log(output.strip())
+        self._run_background(operation, success, "Desplegando")
+
+    def _reload_project(self, project, actions: ProjectActions) -> None:
+        def operation():
+            result = GitService(project.path).reload(actions.branch)
+            with open_app(seed=False) as app:
+                summary = app.index_service().index_project(project.id, rebuild=False, progress=self._index_progress_callback)
+            return result, summary
+        def success(result):
+            _, summary = result
+            self._log(f"[OK] Recarga completada y reindexada: {summary.files_found} archivos.")
+        self._run_background(operation, success, "Recargando proyecto", refresh_projects=True)
+
+    def _build_release(self, project, actions: ProjectActions) -> None:
+        from tkinter import simpledialog, messagebox
+        version = simpledialog.askstring("Compilar EXE", "Versión (ej. v25.1):", parent=self.root)
+        if not version:
+            return
+        def operation():
+            service = GitHubActionsService(actions.github_owner or "", actions.github_repo or "")
+            if not service.workflow_exists(actions.build_workflow or ""):
+                raise RuntimeError(f"No se encontró el workflow '{actions.build_workflow}' en GitHub.")
+            return service.dispatch(actions.build_workflow or "", actions.branch, {actions.build_input_name: version})
+        def success(ok):
+            self._log(f"[OK] Workflow {actions.build_workflow} disparado para {version}.")
+            messagebox.showinfo("AIDYCAI", f"Compilación iniciada para {version}. Revisa GitHub Actions.", parent=self.root)
+        self._run_background(operation, success, "Disparando compilación")
+
     def select_project(self, project) -> None:
         self.selected_project = project
         if self.active_conversation:
             self.active_conversation.project_id = project.id
         self.project_label.configure(text=project.name)
         self._set_status("Listo")
+        self._render_project_actions(project)
         self._log(f"[INFO] Proyecto seleccionado: {project.name}")
 
     def _require_project(self):
@@ -775,8 +914,14 @@ class AIDYCAIWindow:
         self._set_status("Error")
         self.progress_label.configure(text=f"Error: {type(exc).__name__}")
         self.progress_bar.set(0)
-        self._log(f"[ERROR] {type(exc).__name__}: {exc}")
+        message = f"{type(exc).__name__}: {exc}"
+        self._log("[ERROR] " + message)
         traceback.print_exception(type(exc), exc, exc.__traceback__)
+        try:
+            from tkinter import messagebox
+            messagebox.showerror("AIDYCAI — Operación fallida", message, parent=self.root)
+        except Exception:
+            pass
 
     def run(self) -> None:
         self.root.mainloop()

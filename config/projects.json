@@ -1,0 +1,53 @@
+[
+  {
+    "name": "AIDYC",
+    "path": "%USERPROFILE%/OneDrive/Documents/Aidyc",
+    "command": "python launcher.py",
+    "venv": "auto",
+    "open_browser": false,
+    "url": null,
+    "browser_delay": 1.5,
+    "github_owner": "aidycsolutions-ctrl",
+    "github_repo": "Aidyc",
+    "publish": true,
+    "deploy": false,
+    "build_workflow": "main.yml",
+    "branch": "main"
+  },
+  {
+    "name": "AIDYCWeb",
+    "path": "%USERPROFILE%/OneDrive/Documents/AidyCWeb/AidyC-web",
+    "command": "python Aidyc_app.py",
+    "venv": "venv",
+    "open_browser": true,
+    "url": "http://127.0.0.1:5000",
+    "browser_delay": 2.0,
+    "github_owner": "aidycsolutions-ctrl",
+    "github_repo": "AidyC-web",
+    "publish": true,
+    "deploy": true,
+    "deploy_user": "angeljoc",
+    "deploy_host": "ssh.pythonanywhere.com",
+    "deploy_path": "/home/angeljoc",
+    "deploy_script": "scripts/deploy-pythonanywhere.sh",
+    "branch": "main"
+  },
+  {
+    "name": "deunacolombia",
+    "path": "%USERPROFILE%/OneDrive/Documents/Deuna/deunacolombia",
+    "command": "python deunaapp2.py",
+    "venv": "auto",
+    "open_browser": true,
+    "url": "http://127.0.0.1:5000",
+    "browser_delay": 2.0,
+    "github_owner": "aidycsolutions-ctrl",
+    "github_repo": "deunacolombia",
+    "publish": true,
+    "deploy": true,
+    "deploy_user": "angeljoc",
+    "deploy_host": "ssh.pythonanywhere.com",
+    "deploy_path": "/home/angeljoc/deunacolombia",
+    "deploy_script": "scripts/deploy-pythonanywhere.sh",
+    "branch": "main"
+  }
+]
