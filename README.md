@@ -11,6 +11,10 @@ La Fase 1 registra proyectos. La Fase 2 construye un índice local (SQLite + AST
 
 ## Instalación
 
+En Windows, después de clonar o descargar el repositorio, ejecuta **Preparar_AIDYCAI.bat**. El asistente prepara el entorno, instala la interfaz gráfica y crea un acceso directo en el Escritorio con el logo de AIDYCAI. Requiere Python 3.12 o posterior.
+
+La instalación manual sigue disponible.
+
 Desde `Documents\AIDYCAI`:
 
 ```text
