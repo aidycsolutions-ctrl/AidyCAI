@@ -9,9 +9,8 @@ from aidycai.application.project_actions import ProjectActions
 
 
 def _win_user_path(relative: str) -> Path:
-    if os.name == "nt":
-        return Path(os.environ.get("USERPROFILE", Path.home())) / relative
-    return Path(r"C:\Users\USUARIO") / relative
+    root = Path(os.environ.get("USERPROFILE", Path.home()))
+    return root / relative
 
 
 @dataclass(frozen=True)

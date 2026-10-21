@@ -1,7 +1,7 @@
 [
   {
     "name": "AIDYC",
-    "path": "%USERPROFILE%/OneDrive/Documents/Aidyc",
+    "path": "~/Documentos/Proyectos_AidyC/Aidyc",
     "command": "python launcher.py",
     "venv": "auto",
     "open_browser": false,
@@ -16,9 +16,9 @@
   },
   {
     "name": "AIDYCWeb",
-    "path": "%USERPROFILE%/OneDrive/Documents/AidyCWeb/AidyC-web",
+    "path": "~/Documentos/Proyectos_AidyC/AidyC-web",
     "command": "python Aidyc_app.py",
-    "venv": "venv",
+    "venv": "auto",
     "open_browser": true,
     "url": "http://127.0.0.1:5000",
     "browser_delay": 2.0,
@@ -30,11 +30,12 @@
     "deploy_host": "ssh.pythonanywhere.com",
     "deploy_path": "/home/angeljoc",
     "deploy_script": "scripts/deploy-pythonanywhere.sh",
-    "branch": "main"
+    "branch": "main",
+    "extra_excludes": ["uploads"]
   },
   {
     "name": "deunacolombia",
-    "path": "%USERPROFILE%/OneDrive/Documents/Deuna/deunacolombia",
+    "path": "~/Documentos/Proyectos_AidyC/deunacolombia",
     "command": "python deunaapp2.py",
     "venv": "auto",
     "open_browser": true,

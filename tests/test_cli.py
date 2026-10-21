@@ -55,7 +55,7 @@ def test_cli_system_info(isolate_aidycai_data):
 
 def test_seed_registers_default_projects_when_paths_exist():
     available = [spec.name for spec in DEFAULT_PROJECTS if spec.path.is_dir()]
-    assert available == ["AIDYC", "AIDYCWeb", "catalog-studio", "deunacolombia"]
+    assert available == ["AIDYC", "AIDYCWeb", "deunacolombia"]
     with open_app(seed=True) as context:
         names = [project.name for project in context.registry.list_projects()]
     assert names == available

@@ -49,7 +49,7 @@ Reduction: 1.9%
 Estimated tokens: 13
 Graph depth: 0
 Search seconds: 0.001
-Total seconds: 0.002
+Total seconds: 0.003
 
 LIMITATIONS
 

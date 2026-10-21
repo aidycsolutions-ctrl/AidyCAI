@@ -105,6 +105,75 @@ def project_add(
     _with_app(run)
 
 
+@project_app.command("discover")
+def project_discover(
+    root: str | None = typer.Argument(
+        None,
+        help="Carpeta donde buscar. Por defecto: Documentos/Proyectos_AidyC o Documents.",
+    ),
+    depth: int = typer.Option(
+        1,
+        "--depth",
+        min=0,
+        help="0=solo la carpeta indicada; 1=subcarpetas inmediatas; 2+=más niveles.",
+    ),
+    add: bool = typer.Option(
+        False,
+        "--add",
+        help="Registrar automáticamente los candidatos que aún no estén en el registro.",
+    ),
+) -> None:
+    """Busca carpetas que parecen proyectos y opcionalmente las registra."""
+    from aidycai.application.project_discovery import default_search_root, discover_projects
+    from aidycai.domain.exceptions import DuplicateProjectError, InvalidPathError
+
+    search_root = root or str(default_search_root())
+
+    def run(context: AppContext) -> None:
+        try:
+            found = discover_projects(
+                search_root,
+                depth=depth,
+                registered=context.registry.list_projects(),
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1) from exc
+
+        if not found:
+            console.print(f"No se encontraron proyectos en {search_root} (depth={depth}).")
+            return
+
+        table = Table(title=f"Descubiertos en {search_root}")
+        table.add_column("Nombre")
+        table.add_column("Estado")
+        table.add_column("Marcadores")
+        table.add_column("Ruta")
+        for item in found:
+            status = "registrado" if item.already_registered else "nuevo"
+            table.add_row(item.name, status, ", ".join(item.markers), str(item.path))
+        console.print(table)
+
+        if not add:
+            console.print("Usa [bold]aidycai project discover --add[/bold] para registrar los nuevos.")
+            return
+
+        added = 0
+        for item in found:
+            if item.already_registered:
+                continue
+            try:
+                project = context.registry.add(item.name, item.path)
+                context.ensure_project_data(project.id)
+                console.print(f"Registrado [bold]{project.name}[/bold] -> {project.path}")
+                added += 1
+            except (DuplicateProjectError, InvalidPathError) as exc:
+                console.print(f"[yellow]Omitido {item.name}: {exc}[/yellow]")
+        console.print(f"Alta completada: {added} proyecto(s) nuevo(s).")
+
+    _with_app(run)
+
+
 @project_app.command("remove")
 def project_remove(
     name: str = typer.Argument(help="Nombre o id del proyecto en el registro."),

@@ -169,12 +169,28 @@ class AIDYCAIWindow:
                           fg_color="#1E293B", hover_color="#334155",
                           command=lambda t=tab: self._show_section(t)).grid(row=0, column=i, padx=2, sticky="ew")
 
+        project_actions = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        project_actions.pack(fill="x", padx=18, pady=(8, 8))
+        project_actions.grid_columnconfigure(0, weight=1)
+        project_actions.grid_columnconfigure(1, weight=1)
+        self.add_project_button = ctk.CTkButton(
+            project_actions, text="Agregar…", height=36,
+            fg_color="#1E293B", hover_color="#334155", text_color="#F8FAFC",
+            command=self.add_project_folder,
+        )
+        self.add_project_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.discover_button = ctk.CTkButton(
+            project_actions, text="Descubrir…", height=36,
+            fg_color="#1E293B", hover_color="#334155", text_color="#F8FAFC",
+            command=self.discover_projects_folder,
+        )
+        self.discover_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
         self.refresh_button = ctk.CTkButton(
             self.sidebar, text="Actualizar proyectos", height=36,
             fg_color="#1E293B", hover_color="#334155", text_color="#F8FAFC",
             command=self.refresh_projects,
         )
-        self.refresh_button.pack(fill="x", padx=18, pady=18)
+        self.refresh_button.pack(fill="x", padx=18, pady=(0, 18))
 
         self.main = ctk.CTkFrame(self.root, corner_radius=0, fg_color=("#F4F7FB", "#0B1120"))
         self.main.grid(row=0, column=1, sticky="nsew", padx=0, pady=0)
@@ -630,6 +646,98 @@ class AIDYCAIWindow:
                 return app.registry.list_projects()
 
         self._run_background(operation, self._set_projects, "Actualizando proyectos")
+
+    def add_project_folder(self) -> None:
+        from tkinter import filedialog, simpledialog
+
+        from aidycai.application.project_discovery import default_search_root
+
+        path = filedialog.askdirectory(
+            parent=self.root,
+            title="Selecciona la carpeta del proyecto",
+            initialdir=str(default_search_root()),
+        )
+        if not path:
+            return
+        folder = Path(path)
+        name = simpledialog.askstring(
+            "AIDYCAI",
+            "Nombre del proyecto:",
+            initialvalue=folder.name,
+            parent=self.root,
+        )
+        if not name or not name.strip():
+            return
+
+        def operation():
+            with open_app(seed=False) as app:
+                project = app.registry.add(name.strip(), folder)
+                app.ensure_project_data(project.id)
+                return app.registry.list_projects(), project.name
+
+        def on_done(result) -> None:
+            projects, project_name = result
+            self._set_projects(projects)
+            self._set_status(f"Registrado {project_name}")
+            self._log(f"Proyecto agregado: {project_name} -> {folder}")
+
+        self._run_background(operation, on_done, f"Registrando {name.strip()}")
+
+    def discover_projects_folder(self) -> None:
+        from tkinter import filedialog
+
+        from aidycai.application.project_discovery import default_search_root, discover_projects
+        from aidycai.domain.exceptions import DuplicateProjectError, InvalidPathError
+
+        root = filedialog.askdirectory(
+            parent=self.root,
+            title="Carpeta donde buscar proyectos",
+            initialdir=str(default_search_root()),
+        )
+        if not root:
+            return
+
+        def operation():
+            with open_app(seed=False) as app:
+                found = discover_projects(root, depth=1, registered=app.registry.list_projects())
+                added_names: list[str] = []
+                for item in found:
+                    if item.already_registered:
+                        continue
+                    try:
+                        project = app.registry.add(item.name, item.path)
+                        app.ensure_project_data(project.id)
+                        added_names.append(project.name)
+                    except (DuplicateProjectError, InvalidPathError):
+                        continue
+                return app.registry.list_projects(), found, added_names
+
+        def on_done(result) -> None:
+            projects, found, added_names = result
+            self._set_projects(projects)
+            total = len(found)
+            new_count = sum(1 for item in found if not item.already_registered)
+            if not found:
+                messagebox.showinfo(
+                    "AIDYCAI",
+                    f"No se encontraron proyectos en:\n{root}",
+                    parent=self.root,
+                )
+                return
+            messagebox.showinfo(
+                "AIDYCAI",
+                (
+                    f"Encontrados: {total}\n"
+                    f"Nuevos candidatos: {new_count}\n"
+                    f"Registrados ahora: {len(added_names)}\n"
+                    + (", ".join(added_names) if added_names else "Ninguno nuevo.")
+                ),
+                parent=self.root,
+            )
+            self._set_status(f"Descubrimiento: +{len(added_names)}")
+            self._log(f"Descubrimiento en {root}: +{len(added_names)} de {total}")
+
+        self._run_background(operation, on_done, "Descubriendo proyectos")
 
     def _set_projects(self, projects) -> None:
         self.projects = list(projects)

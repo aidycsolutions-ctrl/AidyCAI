@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Iterable
 
@@ -45,4 +44,6 @@ def write_text_file(path: Path, text: str) -> None:
 
 
 def resolve_user_path(value: str) -> Path:
-    return Path(os.path.expandvars(os.path.expanduser(value))).resolve()
+    from aidycai.application.project_config import _expand_path
+
+    return _expand_path(value)

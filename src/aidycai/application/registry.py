@@ -141,6 +141,14 @@ class ProjectRegistry:
         settings = self._repository.get_settings(project.id)
         return parse_excludes(settings.get(EXCLUDE_SETTING_KEY))
 
+    def get_settings(self, name_or_id: str) -> dict[str, str]:
+        project = self._require(name_or_id)
+        return self._repository.get_settings(project.id)
+
+    def set_setting(self, name_or_id: str, key: str, value: str) -> None:
+        project = self._require(name_or_id)
+        self._repository.set_setting(project.id, key, value)
+
     def require(self, name_or_id: str) -> Project:
         return self._require(name_or_id)
 
