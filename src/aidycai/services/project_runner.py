@@ -70,6 +70,10 @@ class ProjectRunner:
             merged_env = os.environ.copy()
             if env:
                 merged_env.update(env)
+            # La salida del proceso se captura como UTF-8 abajo. En Windows,
+            # Python puede conservar cp1252 como encoding de stdout y fallar
+            # cuando una aplicación imprime emojis u otros caracteres Unicode.
+            merged_env.setdefault("PYTHONIOENCODING", "utf-8:replace")
             if venv:
                 root = Path(cwd).expanduser().resolve()
                 raw = str(venv).strip()

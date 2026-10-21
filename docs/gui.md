@@ -20,9 +20,14 @@ pip install -e ".[dev,gui]"
 aidycai gui
 ```
 
+En Windows, si descargaste el repositorio desde GitHub, ejecuta **Preparar_AIDYCAI.bat** una vez. Prepara el entorno e instala la GUI y crea AIDYCAI.lnk en el Escritorio con el icono del proyecto. El acceso directo vuelve a funcionar mientras el repositorio permanezca en la ubicación donde lo descargaste.
+
+Al pulsar **Ejecutar**, AIDYCAI prepara un entorno Python separado por proyecto en %LOCALAPPDATA%\AIDYCAI\environments. Instala las dependencias de requirements.txt o de [project].dependencies en pyproject.toml la primera vez y vuelve a prepararlo si cambia el manifiesto. No crea .venv ni instala paquetes dentro de la carpeta original del proyecto. Si el proyecto no incluye ninguno de esos manifiestos, se crea el entorno vacío y AIDYCAI lo indica en el registro.
+
 La GUI permite:
 
 - seleccionar proyectos registrados;
+- buscar repositorios Git en una carpeta elegida y agregarlos al registro;
 - consultar el Context Engine;
 - buscar en FTS5;
 - indexar un proyecto;
@@ -44,6 +49,12 @@ GUI
 ```
 
 Cada operación de fondo abre un `AppContext` independiente para no compartir la conexión SQLite de la ventana principal entre hilos.
+
+## Encontrar proyectos descargados
+
+Usa **Buscar proyectos en carpeta** en la barra lateral y elige la carpeta que contiene tus repositorios. AIDYCAI revisa esa carpeta y sus subcarpetas directas, incluyendo repositorios con un directorio o archivo \`.git\` (como los worktrees de Git). Puedes seleccionar varios y agregarlos juntos. La búsqueda no recorre carpetas profundas, entornos virtuales ni directorios de dependencias.
+
+En un computador nuevo, descarga o clona tus repositorios en la carpeta que prefieras y repite este proceso. El registro de AIDYCAI es local al computador; agregar un proyecto solo guarda su ruta y no copia ni modifica sus archivos.
 
 ## Conversaciones y legibilidad
 

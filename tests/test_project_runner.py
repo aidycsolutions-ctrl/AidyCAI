@@ -27,6 +27,17 @@ def test_start_project_uses_venv_python(tmp_path):
         kwargs = popen.call_args.kwargs
         assert kwargs["env"]["VIRTUAL_ENV"] == str(tmp_path / ".venv")
         assert kwargs["env"]["PATH"].startswith(str(venv))
+        assert kwargs["env"]["PYTHONIOENCODING"] == "utf-8:replace"
+
+
+def test_start_project_preserves_explicit_python_io_encoding(tmp_path):
+    runner = ProjectRunner()
+    with patch("aidycai.services.project_runner.subprocess.Popen") as popen:
+        popen.return_value.poll.return_value = 0
+        runner.start_project(
+            "python app.py", tmp_path, env={"PYTHONIOENCODING": "latin-1"}
+        )
+        assert popen.call_args.kwargs["env"]["PYTHONIOENCODING"] == "latin-1"
 
 
 def test_auto_resolves_dotvenv_then_venv(tmp_path):

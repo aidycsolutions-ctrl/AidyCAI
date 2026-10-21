@@ -6,7 +6,7 @@ import queue
 import threading
 import traceback
 import webbrowser
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -16,9 +16,11 @@ from aidycai.application.diagnostics import render_diagnosis, render_human_answe
 from aidycai.domain.context_models import ContextBundle, ROLE_PRIMARY
 from aidycai.application.defaults import DEFAULT_PROJECTS
 from aidycai.application.project_config import get_project_config
+from aidycai.application.project_discovery import discover_git_projects
 from aidycai.application.project_actions import ProjectActions
 from aidycai.infrastructure.git_service import GitService
 from aidycai.services.project_runner import ProjectRunner
+from aidycai.services.python_environment import PythonEnvironmentManager
 from aidycai.services.publisher_service import PublisherService
 from aidycai.services.github_actions import GitHubActionsService
 from aidycai.services.work_items import WorkItemStore
@@ -158,6 +160,13 @@ class AIDYCAIWindow:
 
         self.project_box = ctk.CTkScrollableFrame(self.sidebar, fg_color="#111C31")
         self.project_box.pack(fill="both", expand=True, padx=10)
+
+        self.discover_projects_button = ctk.CTkButton(
+            self.sidebar, text="Buscar proyectos en carpeta", height=36,
+            fg_color="#2563EB", hover_color="#1D4ED8", text_color="#FFFFFF",
+            command=self.choose_project_folder,
+        )
+        self.discover_projects_button.pack(fill="x", padx=18, pady=(10, 0))
 
         ctk.CTkLabel(self.sidebar, text="CENTRO DE TRABAJO", anchor="w",
                      text_color="#94A3B8", font=ctk.CTkFont(size=12, weight="bold")).pack(fill="x", padx=20, pady=(12, 8))
@@ -631,6 +640,98 @@ class AIDYCAIWindow:
 
         self._run_background(operation, self._set_projects, "Actualizando proyectos")
 
+    def choose_project_folder(self) -> None:
+        folder = filedialog.askdirectory(
+            title="Elige la carpeta donde descargaste tus proyectos",
+            parent=self.root,
+        )
+        if not folder:
+            return
+
+        def operation():
+            paths = discover_git_projects(folder)
+            with open_app(seed=False) as app:
+                registered = {project.path.resolve() for project in app.registry.list_projects()}
+            return [(path, path in registered) for path in paths]
+
+        self._run_background(operation, self._show_discovered_projects, "Buscando repositorios")
+
+    def _show_discovered_projects(self, discovered) -> None:
+        if not discovered:
+            messagebox.showinfo(
+                "AIDYCAI",
+                "No encontré repositorios Git en esa carpeta ni en sus subcarpetas directas.",
+                parent=self.root,
+            )
+            return
+
+        window = self.ctk.CTkToplevel(self.root)
+        window.title("Proyectos encontrados")
+        window.geometry("720x500")
+        window.minsize(560, 360)
+        window.transient(self.root)
+        window.grab_set()
+        window.grid_columnconfigure(0, weight=1)
+        window.grid_rowconfigure(1, weight=1)
+        self.ctk.CTkLabel(
+            window,
+            text="Selecciona los repositorios que quieres agregar a AIDYCAI.",
+            anchor="w",
+        ).grid(row=0, column=0, sticky="ew", padx=20, pady=(18, 10))
+
+        list_frame = self.ctk.CTkScrollableFrame(window)
+        list_frame.grid(row=1, column=0, sticky="nsew", padx=16, pady=6)
+        selected = []
+        for path, already_registered in discovered:
+            variable = self.ctk.BooleanVar(value=not already_registered)
+            selected.append((path, variable, already_registered))
+            label = f"{path.name}  ·  {path}"
+            if already_registered:
+                label += "  ·  ya agregado"
+            checkbox = self.ctk.CTkCheckBox(list_frame, text=label, variable=variable)
+            checkbox.pack(fill="x", padx=8, pady=7)
+            if already_registered:
+                checkbox.configure(state="disabled")
+
+        buttons = self.ctk.CTkFrame(window, fg_color="transparent")
+        buttons.grid(row=2, column=0, sticky="ew", padx=16, pady=(8, 16))
+        buttons.grid_columnconfigure(0, weight=1)
+        self.ctk.CTkButton(
+            buttons, text="Cancelar", fg_color=("#E2E8F0", "#334155"),
+            text_color=("#0F172A", "#F8FAFC"), command=window.destroy,
+        ).grid(row=0, column=1, padx=(0, 8))
+
+        def add_selected() -> None:
+            paths = [path for path, variable, was_registered in selected if variable.get() and not was_registered]
+            if not paths:
+                messagebox.showinfo("AIDYCAI", "Selecciona al menos un proyecto nuevo.", parent=window)
+                return
+            window.destroy()
+
+            def operation():
+                added, errors = [], []
+                with open_app(seed=False) as app:
+                    for path in paths:
+                        try:
+                            added.append(app.registry.add(path.name, path))
+                        except Exception as exc:
+                            errors.append(f"{path.name}: {exc}")
+                return added, errors
+
+            def complete(result) -> None:
+                added, errors = result
+                message = f"Se agregaron {len(added)} proyecto(s)."
+                if errors:
+                    message += "\n\n" + "\n".join(errors)
+                messagebox.showinfo("AIDYCAI", message, parent=self.root)
+
+            self._run_background(operation, complete, "Agregando proyectos", refresh_projects=True)
+
+        self.ctk.CTkButton(
+            buttons, text="Agregar seleccionados", fg_color="#2563EB",
+            hover_color="#1D4ED8", command=add_selected,
+        ).grid(row=0, column=2)
+
     def _set_projects(self, projects) -> None:
         self.projects = list(projects)
         for widget in self.project_box.winfo_children():
@@ -851,12 +952,31 @@ class AIDYCAIWindow:
             return
         def output(line: str) -> None:
             self.root.after(0, lambda: self._log(f"[{project.name}] {line}"))
-        try:
-            runner.start_project(actions.command or "", project.path, venv=actions.venv, on_output=output, env=actions.extra_env, open_browser=actions.open_browser, url=actions.url, browser_delay=actions.browser_delay)
-            self._set_status(f"{project.name} ejecutándose")
+
+        def operation():
+            environment = PythonEnvironmentManager().prepare(project.path, project.id)
+            runner.start_project(
+                actions.command or "",
+                project.path,
+                venv=str(environment.path),
+                on_output=output,
+                env=actions.extra_env,
+                open_browser=actions.open_browser,
+                url=actions.url,
+                browser_delay=actions.browser_delay,
+            )
+            return environment
+
+        def success(environment) -> None:
+            detail = environment.dependency_source or "sin manifiesto de dependencias reconocido"
+            action = "creado" if environment.created else "reutilizado"
+            self._log(f"[OK] Entorno Python {action}: {environment.path} · dependencias: {detail}")
+            if environment.dependencies_installed:
+                self._log(f"[OK] Dependencias instaladas desde {environment.dependency_source}.")
             self._log(f"[OK] Ejecutando: {actions.command} · Python: {runner.executable}")
-        except Exception as exc:
-            self._log(f"[ERROR] {exc}")
+            self.root.after(0, lambda: self._set_status(f"{project.name} ejecutándose"))
+
+        self._run_background(operation, success, f"Preparando {project.name}")
 
     def _stop_project(self, project) -> None:
         runner = self._project_runners.get(project.id)
